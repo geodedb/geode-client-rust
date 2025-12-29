@@ -147,10 +147,7 @@ impl Connection {
                 Err(e) => {
                     last_err = Some(e);
                     if attempt < 3 {
-                        eprintln!(
-                            "[QUINN] Connection attempt {} failed, retrying...",
-                            attempt
-                        );
+                        eprintln!("[QUINN] Connection attempt {} failed, retrying...", attempt);
                         tokio::time::sleep(Duration::from_millis(150)).await;
                     }
                 }
@@ -192,7 +189,7 @@ impl Connection {
 
         let mut client_config = ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto)
-                .map_err(|e| Error::connection(&format!("Failed to create QUIC config: {}", e)))?
+                .map_err(|e| Error::connection(&format!("Failed to create QUIC config: {}", e)))?,
         ));
 
         // Configure QUIC transport parameters to match Python/Go clients
@@ -209,7 +206,12 @@ impl Connection {
         // Resolve server address (supports hostnames as well as IP literals)
         let mut resolved_addrs = format!("{}:{}", host, port)
             .to_socket_addrs()
-            .map_err(|e| Error::connection(&format!("Failed to resolve address {}:{} - {}", host, port, e)))?;
+            .map_err(|e| {
+                Error::connection(&format!(
+                    "Failed to resolve address {}:{} - {}",
+                    host, port, e
+                ))
+            })?;
 
         let server_addr: SocketAddr = resolved_addrs
             .find(|addr| matches!(addr, SocketAddr::V4(_) | SocketAddr::V6(_)))
@@ -220,7 +222,7 @@ impl Connection {
         // When skipping verification, don't use actual hostname for SNI
         // This matches Python client behavior which avoids server_name when skip_verify=True
         let server_name = if skip_verify {
-            "localhost"  // Use generic name when skipping verification
+            "localhost" // Use generic name when skipping verification
         } else {
             host
         };
@@ -229,8 +231,9 @@ impl Connection {
 
         let conn = timeout(
             Duration::from_secs(10),
-            endpoint.connect(server_addr, server_name)
-                .map_err(|e| Error::connection(&format!("Connection failed: {}", e)))?
+            endpoint
+                .connect(server_addr, server_name)
+                .map_err(|e| Error::connection(&format!("Connection failed: {}", e)))?,
         )
         .await
         .map_err(|_| Error::connection("Connection timeout"))?
@@ -303,10 +306,13 @@ impl Connection {
 
     async fn read_json_line(&mut self, timeout_secs: u64) -> Result<serde_json::Value> {
         let mut line = String::new();
-        let n = timeout(Duration::from_secs(timeout_secs), self.reader.read_line(&mut line))
-            .await
-            .map_err(|_| Error::timeout())?
-            .map_err(|e| Error::connection(&format!("Failed to read response: {}", e)))?;
+        let n = timeout(
+            Duration::from_secs(timeout_secs),
+            self.reader.read_line(&mut line),
+        )
+        .await
+        .map_err(|_| Error::timeout())?
+        .map_err(|e| Error::connection(&format!("Failed to read response: {}", e)))?;
 
         if n == 0 {
             return Err(Error::connection("Connection closed"));
@@ -355,11 +361,7 @@ impl Connection {
         // Control frames typically echo back a STATUS/ACK result; treat ERROR specially.
         let resp = self.read_json_line(5).await?;
         if let Some(result) = resp.get("result") {
-            if result
-                .get("type")
-                .and_then(|t| t.as_str())
-                == Some("ERROR")
-            {
+            if result.get("type").and_then(|t| t.as_str()) == Some("ERROR") {
                 let code = result
                     .get("code")
                     .and_then(|c| c.as_str())
@@ -417,13 +419,13 @@ impl Connection {
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
 
-        let res_type = result
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
+        let res_type = result.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
         if res_type == "ERROR" {
-            let code = result.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN");
+            let code = result
+                .get("code")
+                .and_then(|c| c.as_str())
+                .unwrap_or("UNKNOWN");
             let msg = result
                 .get("message")
                 .and_then(|m| m.as_str())
@@ -477,10 +479,7 @@ impl Connection {
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
 
-            let r#type = result
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+            let r#type = result.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
             match r#type {
                 "BINDINGS" => {
@@ -554,7 +553,11 @@ impl Connection {
     }
 
     /// Execute a query without parameters (synchronous-style blocking version for test runner)
-    pub fn query_sync(&mut self, gql: &str, params: Option<HashMap<String, serde_json::Value>>) -> Result<Page> {
+    pub fn query_sync(
+        &mut self,
+        gql: &str,
+        params: Option<HashMap<String, serde_json::Value>>,
+    ) -> Result<Page> {
         let params_map = params.unwrap_or_default();
         let params_typed: HashMap<String, Value> = params_map
             .into_iter()
@@ -566,7 +569,8 @@ impl Connection {
 
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
-                let (page, _cursor) = handle.block_on(self.query_with_params(gql, &params_typed))?;
+                let (page, _cursor) =
+                    handle.block_on(self.query_with_params(gql, &params_typed))?;
                 Ok(page)
             }
             Err(_) => {

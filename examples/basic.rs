@@ -14,7 +14,9 @@ async fn main() -> Result<()> {
     println!("Connected to Geode via QUIC!");
 
     // Simple query
-    let (page, _) = conn.query("RETURN 1 AS x, 'Hello QUIC' AS greeting").await?;
+    let (page, _) = conn
+        .query("RETURN 1 AS x, 'Hello QUIC' AS greeting")
+        .await?;
     println!("\nSimple query results:");
     for row in &page.rows {
         if let (Ok(x), Ok(greeting)) = (
@@ -30,7 +32,9 @@ async fn main() -> Result<()> {
     params.insert("name".to_string(), Value::string("Alice"));
     params.insert("age".to_string(), Value::int(30));
 
-    let (page, _) = conn.query_with_params("RETURN $name AS name, $age AS age", &params).await?;
+    let (page, _) = conn
+        .query_with_params("RETURN $name AS name, $age AS age", &params)
+        .await?;
     println!("\nParameterized query results:");
     for row in &page.rows {
         if let (Ok(name), Ok(age)) = (
@@ -49,10 +53,10 @@ async fn main() -> Result<()> {
     create_params.insert("name".to_string(), Value::string("Bob"));
     create_params.insert("age".to_string(), Value::int(25));
 
-    match conn.query_with_params(
-        "CREATE (p:Person {name: $name, age: $age})",
-        &create_params,
-    ).await {
+    match conn
+        .query_with_params("CREATE (p:Person {name: $name, age: $age})", &create_params)
+        .await
+    {
         Ok(_) => {
             conn.commit()?;
             println!("Transaction committed successfully");

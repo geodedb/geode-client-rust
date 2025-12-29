@@ -1,6 +1,8 @@
 //! Advanced example demonstrating connection pooling and query builders with QUIC.
 
-use geode_client::{Client, ConnectionPool, EdgeDirection, PatternBuilder, QueryBuilder, Result, Value};
+use geode_client::{
+    Client, ConnectionPool, EdgeDirection, PatternBuilder, QueryBuilder, Result, Value,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio;
@@ -58,9 +60,11 @@ async fn connection_pool_example() -> Result<()> {
     println!("\n=== Connection Pool Example ===\n");
 
     // Create connection pool
-    let pool = Arc::new(ConnectionPool::new("127.0.0.1", 3141, 10)
-        .skip_verify(true)
-        .page_size(1000));
+    let pool = Arc::new(
+        ConnectionPool::new("127.0.0.1", 3141, 10)
+            .skip_verify(true)
+            .page_size(1000),
+    );
 
     println!("Created connection pool with max_size=10");
 

@@ -8,7 +8,8 @@ async fn main() -> Result<()> {
 
     println!("[TEST] Creating Quinn-based client...");
 
-    let server_addr = std::env::var("GEODE_SERVER").unwrap_or_else(|_| "127.0.0.1:3141".to_string());
+    let server_addr =
+        std::env::var("GEODE_SERVER").unwrap_or_else(|_| "127.0.0.1:3141".to_string());
     println!("[TEST] Using server address: {}", server_addr);
 
     let parts: Vec<&str> = server_addr.split(':').collect();
