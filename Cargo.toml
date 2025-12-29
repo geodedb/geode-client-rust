@@ -1,0 +1,71 @@
+[package]
+name = "geode-client"
+version = "0.1.0"
+edition = "2021"
+authors = ["Geode Contributors"]
+description = "Rust client library for Geode graph database with full GQL support"
+license = "MIT"
+repository = "https://gitlab.com/devnw/geode/geode-client-rust"
+keywords = ["database", "graph", "gql", "geode"]
+categories = ["database"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# QUIC support - using quinn (Pure Rust QUIC with rustls)
+quinn = "0.11"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls-pemfile = "2.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Utilities
+bytes = "1.5"
+futures = "0.3"
+
+# Decimal support
+rust_decimal = "1.33"
+
+# Datetime support
+chrono = { version = "0.4", features = ["serde"] }
+
+# URL parsing
+url = "2.5"
+
+# Hex encoding/decoding
+hex = "0.4"
+
+# Logging
+log = "0.4"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "advanced"
+path = "examples/advanced.rs"
+
+[[example]]
+name = "test_quinn"
+path = "examples/test_quinn.rs"
+
+[lib]
+name = "geode_client"
+path = "src/lib.rs"
+
+[features]
+default = ["quic"]
+quic = []
+
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = "0.5"
+env_logger = "0.11"
