@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Geode Contributors"]
 description = "Rust client library for Geode graph database with full GQL support"
 license = "MIT"
-repository = "https://gitlab.com/devnw/geode/geode-client-rust"
+repository = "https://gitlab.com/devnw/codepros/geode/geode-client-rust"
 keywords = ["database", "graph", "gql", "geode"]
 categories = ["database"]
 

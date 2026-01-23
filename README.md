@@ -1,6 +1,6 @@
 # Geode Rust Client
 
-A high-performance async Rust client library for [Geode](https://gitlab.com/devnw/geode/geode) graph database with full GQL (ISO/IEC 39075:2024) support via QUIC+TLS.
+A high-performance async Rust client library for [Geode](https://gitlab.com/devnw/codepros/geode/geode) graph database with full GQL (ISO/IEC 39075:2024) support via QUIC+TLS.
 
 ## Features
 
@@ -292,6 +292,6 @@ MIT License - see LICENSE file for details.
 
 ## Related
 
-- [Geode Database](https://gitlab.com/devnw/geode/geode) - Main Geode project
+- [Geode Database](https://gitlab.com/devnw/codepros/geode/geode) - Main Geode project
 - [Python Client](../python/) - Official Python client
 - [Go Client](../go/) - Official Go client
