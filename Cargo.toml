@@ -38,6 +38,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # URL parsing
 url = "2.5"
+urlencoding = "2.1"
 
 # Hex encoding/decoding
 hex = "0.4"
@@ -64,8 +65,23 @@ path = "src/lib.rs"
 [features]
 default = ["quic"]
 quic = []
+integration = []  # Enable integration tests with Docker
 
 [dev-dependencies]
 tokio-test = "0.4"
 criterion = "0.5"
 env_logger = "0.11"
+rust_decimal_macros = "1.33"
+testcontainers = "0.23"
+once_cell = "1.19"
+proptest = "1.5"
+arbitrary = { version = "1.4", features = ["derive"] }
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+required-features = ["integration"]
+
+[[bench]]
+name = "benchmarks"
+harness = false

@@ -50,11 +50,13 @@ pub struct Value {
     bool_value: bool,
     string_value: String,
     decimal_value: Option<Decimal>,
+    #[allow(dead_code)] // Reserved for future decimal scale support
     decimal_scale: String,
     array_value: Vec<Value>,
     object_value: HashMap<String, Value>,
     bytes_value: Vec<u8>,
     date_value: Option<NaiveDate>,
+    #[allow(dead_code)] // Reserved for future time type support
     time_value: Option<NaiveTime>,
     timestamp_value: Option<DateTime<Utc>>,
     range_value: Option<Range>,
@@ -418,8 +420,8 @@ pub fn decode_value(raw: &serde_json::Value, type_name: &str) -> Result<Value> {
         "STRING" => Ok(Value::string(raw.as_str().unwrap_or(""))),
         "BYTEA" => {
             let s = raw.as_str().unwrap_or("");
-            let bytes = if s.starts_with("\\x") {
-                hex::decode(&s[2..]).unwrap_or_default()
+            let bytes = if let Some(hex_str) = s.strip_prefix("\\x") {
+                hex::decode(hex_str).unwrap_or_default()
             } else {
                 Vec::new()
             };
@@ -519,5 +521,865 @@ pub fn decode_value(raw: &serde_json::Value, type_name: &str) -> Result<Value> {
                 Ok(Value::string(raw.to_string()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Datelike, Timelike};
+    use rust_decimal_macros::dec;
+    use serde_json::json;
+
+    // ==================== ValueKind Tests ====================
+
+    #[test]
+    fn test_value_kind_equality() {
+        assert_eq!(ValueKind::Null, ValueKind::Null);
+        assert_eq!(ValueKind::Int, ValueKind::Int);
+        assert_ne!(ValueKind::Int, ValueKind::String);
+    }
+
+    #[test]
+    fn test_value_kind_copy() {
+        let kind = ValueKind::Int;
+        let kind_copy = kind;
+        assert_eq!(kind, kind_copy);
+    }
+
+    #[test]
+    fn test_value_kind_debug() {
+        let debug_str = format!("{:?}", ValueKind::Timestamp);
+        assert_eq!(debug_str, "Timestamp");
+    }
+
+    #[test]
+    fn test_value_kind_all_variants() {
+        // Ensure all variants exist and are distinct
+        let variants = [
+            ValueKind::Null,
+            ValueKind::Int,
+            ValueKind::Bool,
+            ValueKind::String,
+            ValueKind::Decimal,
+            ValueKind::Array,
+            ValueKind::Object,
+            ValueKind::Bytea,
+            ValueKind::Date,
+            ValueKind::Time,
+            ValueKind::TimeTz,
+            ValueKind::Timestamp,
+            ValueKind::TimestampTz,
+            ValueKind::Interval,
+            ValueKind::Json,
+            ValueKind::Jsonb,
+            ValueKind::Xml,
+            ValueKind::Url,
+            ValueKind::Domain,
+            ValueKind::Uuid,
+            ValueKind::Enum,
+            ValueKind::BitString,
+            ValueKind::Range,
+        ];
+        assert_eq!(variants.len(), 23);
+        // Check uniqueness
+        for i in 0..variants.len() {
+            for j in (i + 1)..variants.len() {
+                assert_ne!(variants[i], variants[j]);
+            }
+        }
+    }
+
+    // ==================== Value Construction Tests ====================
+
+    #[test]
+    fn test_value_null() {
+        let v = Value::null();
+        assert_eq!(v.kind, ValueKind::Null);
+        assert!(v.is_null());
+    }
+
+    #[test]
+    fn test_value_int() {
+        let v = Value::int(42);
+        assert_eq!(v.kind, ValueKind::Int);
+        assert!(!v.is_null());
+        assert_eq!(v.as_int().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_value_int_negative() {
+        let v = Value::int(-100);
+        assert_eq!(v.as_int().unwrap(), -100);
+    }
+
+    #[test]
+    fn test_value_int_zero() {
+        let v = Value::int(0);
+        assert_eq!(v.as_int().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_value_int_max() {
+        let v = Value::int(i64::MAX);
+        assert_eq!(v.as_int().unwrap(), i64::MAX);
+    }
+
+    #[test]
+    fn test_value_int_min() {
+        let v = Value::int(i64::MIN);
+        assert_eq!(v.as_int().unwrap(), i64::MIN);
+    }
+
+    #[test]
+    fn test_value_bool_true() {
+        let v = Value::bool(true);
+        assert_eq!(v.kind, ValueKind::Bool);
+        assert!(v.as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_value_bool_false() {
+        let v = Value::bool(false);
+        assert!(!v.as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_value_string() {
+        let v = Value::string("hello");
+        assert_eq!(v.kind, ValueKind::String);
+        assert_eq!(v.as_string().unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_value_string_empty() {
+        let v = Value::string("");
+        assert_eq!(v.as_string().unwrap(), "");
+    }
+
+    #[test]
+    fn test_value_string_unicode() {
+        let v = Value::string("こんにちは世界🌍");
+        assert_eq!(v.as_string().unwrap(), "こんにちは世界🌍");
+    }
+
+    #[test]
+    fn test_value_string_owned() {
+        let owned = String::from("owned string");
+        let v = Value::string(owned);
+        assert_eq!(v.as_string().unwrap(), "owned string");
+    }
+
+    #[test]
+    fn test_value_decimal() {
+        let v = Value::decimal(dec!(123.456));
+        assert_eq!(v.kind, ValueKind::Decimal);
+        assert_eq!(v.as_decimal().unwrap(), dec!(123.456));
+    }
+
+    #[test]
+    fn test_value_decimal_precision() {
+        let v = Value::decimal(dec!(0.000000001));
+        assert_eq!(v.as_decimal().unwrap(), dec!(0.000000001));
+    }
+
+    #[test]
+    fn test_value_decimal_large() {
+        let v = Value::decimal(dec!(99999999999999.99));
+        assert_eq!(v.as_decimal().unwrap(), dec!(99999999999999.99));
+    }
+
+    #[test]
+    fn test_value_array_empty() {
+        let v = Value::array(vec![]);
+        assert_eq!(v.kind, ValueKind::Array);
+        assert!(v.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_value_array() {
+        let v = Value::array(vec![Value::int(1), Value::int(2), Value::int(3)]);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0].as_int().unwrap(), 1);
+        assert_eq!(arr[1].as_int().unwrap(), 2);
+        assert_eq!(arr[2].as_int().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_value_array_mixed() {
+        let v = Value::array(vec![
+            Value::int(42),
+            Value::string("hello"),
+            Value::bool(true),
+            Value::null(),
+        ]);
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr[0].as_int().unwrap(), 42);
+        assert_eq!(arr[1].as_string().unwrap(), "hello");
+        assert!(arr[2].as_bool().unwrap());
+        assert!(arr[3].is_null());
+    }
+
+    #[test]
+    fn test_value_array_nested() {
+        let inner = Value::array(vec![Value::int(1), Value::int(2)]);
+        let outer = Value::array(vec![inner]);
+        let arr = outer.as_array().unwrap();
+        let inner_arr = arr[0].as_array().unwrap();
+        assert_eq!(inner_arr.len(), 2);
+    }
+
+    #[test]
+    fn test_value_object_empty() {
+        let v = Value::object(HashMap::new());
+        assert_eq!(v.kind, ValueKind::Object);
+        assert!(v.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_value_object() {
+        let mut map = HashMap::new();
+        map.insert("name".to_string(), Value::string("Alice"));
+        map.insert("age".to_string(), Value::int(30));
+        let v = Value::object(map);
+
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.get("name").unwrap().as_string().unwrap(), "Alice");
+        assert_eq!(obj.get("age").unwrap().as_int().unwrap(), 30);
+    }
+
+    #[test]
+    fn test_value_object_nested() {
+        let mut inner = HashMap::new();
+        inner.insert("city".to_string(), Value::string("NYC"));
+
+        let mut outer = HashMap::new();
+        outer.insert("address".to_string(), Value::object(inner));
+
+        let v = Value::object(outer);
+        let obj = v.as_object().unwrap();
+        let addr = obj.get("address").unwrap().as_object().unwrap();
+        assert_eq!(addr.get("city").unwrap().as_string().unwrap(), "NYC");
+    }
+
+    // ==================== Type Accessor Error Tests ====================
+
+    #[test]
+    fn test_as_int_wrong_type() {
+        let v = Value::string("not an int");
+        let result = v.as_int();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("String"));
+    }
+
+    #[test]
+    fn test_as_bool_wrong_type() {
+        let v = Value::int(42);
+        let result = v.as_bool();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_as_string_wrong_type() {
+        let v = Value::int(42);
+        let result = v.as_string();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_as_decimal_wrong_type() {
+        let v = Value::int(42);
+        let result = v.as_decimal();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_as_array_wrong_type() {
+        let v = Value::int(42);
+        let result = v.as_array();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_as_object_wrong_type() {
+        let v = Value::int(42);
+        let result = v.as_object();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_as_bytes_wrong_type() {
+        let v = Value::int(42);
+        let result = v.as_bytes();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_as_date_wrong_type() {
+        let v = Value::int(42);
+        let result = v.as_date();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_as_timestamp_wrong_type() {
+        let v = Value::int(42);
+        let result = v.as_timestamp();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_as_range_wrong_type() {
+        let v = Value::int(42);
+        let result = v.as_range();
+        assert!(result.is_err());
+    }
+
+    // ==================== String-like Type Accessors ====================
+
+    #[test]
+    fn test_as_string_from_xml() {
+        let v = Value {
+            kind: ValueKind::Xml,
+            string_value: "<root/>".to_string(),
+            ..Value::null()
+        };
+        assert_eq!(v.as_string().unwrap(), "<root/>");
+    }
+
+    #[test]
+    fn test_as_string_from_json() {
+        let v = Value {
+            kind: ValueKind::Json,
+            string_value: r#"{"key":"value"}"#.to_string(),
+            ..Value::null()
+        };
+        assert_eq!(v.as_string().unwrap(), r#"{"key":"value"}"#);
+    }
+
+    #[test]
+    fn test_as_string_from_url() {
+        let v = Value {
+            kind: ValueKind::Url,
+            string_value: "https://example.com".to_string(),
+            ..Value::null()
+        };
+        assert_eq!(v.as_string().unwrap(), "https://example.com");
+    }
+
+    #[test]
+    fn test_as_string_from_uuid() {
+        let v = Value {
+            kind: ValueKind::Uuid,
+            string_value: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            ..Value::null()
+        };
+        assert_eq!(
+            v.as_string().unwrap(),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    // ==================== to_json Tests ====================
+
+    #[test]
+    fn test_to_json_null() {
+        let v = Value::null();
+        assert_eq!(v.to_json(), json!(null));
+    }
+
+    #[test]
+    fn test_to_json_int() {
+        let v = Value::int(42);
+        assert_eq!(v.to_json(), json!(42));
+    }
+
+    #[test]
+    fn test_to_json_bool() {
+        let v = Value::bool(true);
+        assert_eq!(v.to_json(), json!(true));
+    }
+
+    #[test]
+    fn test_to_json_string() {
+        let v = Value::string("hello");
+        assert_eq!(v.to_json(), json!("hello"));
+    }
+
+    #[test]
+    fn test_to_json_decimal() {
+        let v = Value::decimal(dec!(123.45));
+        assert_eq!(v.to_json(), json!("123.45"));
+    }
+
+    #[test]
+    fn test_to_json_array() {
+        let v = Value::array(vec![Value::int(1), Value::int(2)]);
+        assert_eq!(v.to_json(), json!([1, 2]));
+    }
+
+    #[test]
+    fn test_to_json_object() {
+        let mut map = HashMap::new();
+        map.insert("key".to_string(), Value::string("value"));
+        let v = Value::object(map);
+        assert_eq!(v.to_json(), json!({"key": "value"}));
+    }
+
+    #[test]
+    fn test_to_json_bytea_empty() {
+        let v = Value {
+            kind: ValueKind::Bytea,
+            bytes_value: vec![],
+            string_value: "".to_string(),
+            ..Value::null()
+        };
+        assert_eq!(v.to_json(), json!(""));
+    }
+
+    #[test]
+    fn test_to_json_bytea_with_data() {
+        let v = Value {
+            kind: ValueKind::Bytea,
+            bytes_value: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            ..Value::null()
+        };
+        assert_eq!(v.to_json(), json!("\\xdeadbeef"));
+    }
+
+    #[test]
+    fn test_to_json_range() {
+        let range = Range {
+            lower: Some(Box::new(Value::int(1))),
+            upper: Some(Box::new(Value::int(10))),
+            bounds: "[)".to_string(),
+        };
+        let v = Value {
+            kind: ValueKind::Range,
+            range_value: Some(range),
+            ..Value::null()
+        };
+        let j = v.to_json();
+        assert_eq!(j["lower"], json!(1));
+        assert_eq!(j["upper"], json!(10));
+        assert_eq!(j["bounds"], json!("[)"));
+    }
+
+    #[test]
+    fn test_to_json_range_none() {
+        let v = Value {
+            kind: ValueKind::Range,
+            range_value: None,
+            ..Value::null()
+        };
+        assert_eq!(v.to_json(), json!(null));
+    }
+
+    // ==================== from_json Tests ====================
+
+    #[test]
+    fn test_from_json_null() {
+        let v = Value::from_json(json!(null));
+        assert!(v.is_null());
+    }
+
+    #[test]
+    fn test_from_json_bool() {
+        let v = Value::from_json(json!(true));
+        assert!(v.as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_from_json_int() {
+        let v = Value::from_json(json!(42));
+        assert_eq!(v.as_int().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_from_json_float() {
+        let v = Value::from_json(json!(1.5));
+        // Floats are converted to strings
+        assert_eq!(v.kind, ValueKind::String);
+    }
+
+    #[test]
+    fn test_from_json_string() {
+        let v = Value::from_json(json!("hello"));
+        assert_eq!(v.as_string().unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_from_json_array() {
+        let v = Value::from_json(json!([1, 2, 3]));
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn test_from_json_object() {
+        let v = Value::from_json(json!({"name": "Alice"}));
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.get("name").unwrap().as_string().unwrap(), "Alice");
+    }
+
+    #[test]
+    fn test_from_json_nested() {
+        let v = Value::from_json(json!({
+            "users": [
+                {"name": "Alice", "age": 30},
+                {"name": "Bob", "age": 25}
+            ]
+        }));
+        let obj = v.as_object().unwrap();
+        let users = obj.get("users").unwrap().as_array().unwrap();
+        assert_eq!(users.len(), 2);
+    }
+
+    // ==================== decode_value Tests ====================
+
+    #[test]
+    fn test_decode_value_null() {
+        let v = decode_value(&json!(null), "INT").unwrap();
+        assert!(v.is_null());
+    }
+
+    #[test]
+    fn test_decode_value_int_from_number() {
+        let v = decode_value(&json!(42), "INT").unwrap();
+        assert_eq!(v.as_int().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_decode_value_int_from_string() {
+        let v = decode_value(&json!("123"), "INT").unwrap();
+        assert_eq!(v.as_int().unwrap(), 123);
+    }
+
+    #[test]
+    fn test_decode_value_int_invalid_string() {
+        let v = decode_value(&json!("not_a_number"), "INT").unwrap();
+        // Falls back to string
+        assert_eq!(v.kind, ValueKind::String);
+    }
+
+    #[test]
+    fn test_decode_value_decimal() {
+        let v = decode_value(&json!("123.456"), "DECIMAL").unwrap();
+        assert_eq!(v.as_decimal().unwrap(), dec!(123.456));
+    }
+
+    #[test]
+    fn test_decode_value_decimal_from_number() {
+        let v = decode_value(&json!(123), "DECIMAL").unwrap();
+        assert_eq!(v.as_decimal().unwrap(), dec!(123));
+    }
+
+    #[test]
+    fn test_decode_value_bool_true() {
+        let v = decode_value(&json!(true), "BOOL").unwrap();
+        assert!(v.as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_decode_value_bool_false() {
+        let v = decode_value(&json!(false), "BOOL").unwrap();
+        assert!(!v.as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_decode_value_bool_from_string_true() {
+        let v = decode_value(&json!("true"), "BOOL").unwrap();
+        assert!(v.as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_decode_value_bool_from_string_false() {
+        let v = decode_value(&json!("false"), "BOOL").unwrap();
+        assert!(!v.as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_decode_value_bool_from_string_case_insensitive() {
+        let v = decode_value(&json!("TRUE"), "BOOL").unwrap();
+        assert!(v.as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_decode_value_string() {
+        let v = decode_value(&json!("hello"), "STRING").unwrap();
+        assert_eq!(v.as_string().unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_decode_value_bytea() {
+        let v = decode_value(&json!("\\xDEADBEEF"), "BYTEA").unwrap();
+        assert_eq!(v.kind, ValueKind::Bytea);
+        assert_eq!(v.as_bytes().unwrap(), &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn test_decode_value_bytea_no_prefix() {
+        let v = decode_value(&json!("plain"), "BYTEA").unwrap();
+        assert_eq!(v.kind, ValueKind::Bytea);
+        assert!(v.as_bytes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_decode_value_json() {
+        let v = decode_value(&json!({"key": "value"}), "JSON").unwrap();
+        assert_eq!(v.kind, ValueKind::Json);
+    }
+
+    #[test]
+    fn test_decode_value_jsonb() {
+        let v = decode_value(&json!({"key": "value"}), "JSONB").unwrap();
+        assert_eq!(v.kind, ValueKind::Jsonb);
+    }
+
+    #[test]
+    fn test_decode_value_date() {
+        let v = decode_value(&json!("2024-01-15"), "DATE").unwrap();
+        assert_eq!(v.kind, ValueKind::Date);
+        let date = v.as_date().unwrap();
+        assert_eq!(date.to_string(), "2024-01-15");
+    }
+
+    #[test]
+    fn test_decode_value_date_invalid() {
+        let v = decode_value(&json!("not-a-date"), "DATE").unwrap();
+        assert_eq!(v.kind, ValueKind::Date);
+        // Date parsing fails, but value is stored as string
+        assert!(v.date_value.is_none());
+    }
+
+    #[test]
+    fn test_decode_value_timestamp() {
+        let v = decode_value(&json!("2024-01-15T10:30:00Z"), "TIMESTAMP").unwrap();
+        assert_eq!(v.kind, ValueKind::Timestamp);
+        let ts = v.as_timestamp().unwrap();
+        assert_eq!(ts.to_rfc3339(), "2024-01-15T10:30:00+00:00");
+    }
+
+    #[test]
+    fn test_decode_value_timestamptz() {
+        let v = decode_value(&json!("2024-01-15T10:30:00+05:00"), "TIMESTAMPTZ").unwrap();
+        assert_eq!(v.kind, ValueKind::TimestampTz);
+    }
+
+    #[test]
+    fn test_decode_value_range() {
+        let v = decode_value(
+            &json!({"lower": 1, "upper": 10, "bounds": "[)"}),
+            "INT4RANGE",
+        )
+        .unwrap();
+        assert_eq!(v.kind, ValueKind::Range);
+        let range = v.as_range().unwrap();
+        assert_eq!(range.bounds, "[)");
+    }
+
+    #[test]
+    fn test_decode_value_array_generic() {
+        let v = decode_value(&json!([1, 2, 3]), "").unwrap();
+        assert_eq!(v.kind, ValueKind::Array);
+        assert_eq!(v.as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_decode_value_object_generic() {
+        let v = decode_value(&json!({"key": "value"}), "").unwrap();
+        assert_eq!(v.kind, ValueKind::Object);
+    }
+
+    #[test]
+    fn test_decode_value_generic_bool() {
+        let v = decode_value(&json!(true), "UNKNOWN").unwrap();
+        assert!(v.as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_decode_value_generic_int() {
+        let v = decode_value(&json!(42), "UNKNOWN").unwrap();
+        assert_eq!(v.as_int().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_decode_value_generic_float() {
+        let v = decode_value(&json!(1.23), "UNKNOWN").unwrap();
+        // Floats become decimals if parseable
+        assert_eq!(v.kind, ValueKind::Decimal);
+    }
+
+    #[test]
+    fn test_decode_value_generic_string() {
+        let v = decode_value(&json!("hello"), "UNKNOWN").unwrap();
+        assert_eq!(v.as_string().unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_decode_value_case_insensitive() {
+        let v1 = decode_value(&json!(42), "int").unwrap();
+        let v2 = decode_value(&json!(42), "INT").unwrap();
+        let v3 = decode_value(&json!(42), "Int").unwrap();
+        assert_eq!(v1.as_int().unwrap(), 42);
+        assert_eq!(v2.as_int().unwrap(), 42);
+        assert_eq!(v3.as_int().unwrap(), 42);
+    }
+
+    // ==================== Range Tests ====================
+
+    #[test]
+    fn test_range_construction() {
+        let range = Range {
+            lower: Some(Box::new(Value::int(0))),
+            upper: Some(Box::new(Value::int(100))),
+            bounds: "[)".to_string(),
+        };
+        assert_eq!(range.lower.as_ref().unwrap().as_int().unwrap(), 0);
+        assert_eq!(range.upper.as_ref().unwrap().as_int().unwrap(), 100);
+        assert_eq!(range.bounds, "[)");
+    }
+
+    #[test]
+    fn test_range_unbounded_lower() {
+        let range = Range {
+            lower: None,
+            upper: Some(Box::new(Value::int(100))),
+            bounds: "(]".to_string(),
+        };
+        assert!(range.lower.is_none());
+        assert!(range.upper.is_some());
+    }
+
+    #[test]
+    fn test_range_unbounded_upper() {
+        let range = Range {
+            lower: Some(Box::new(Value::int(0))),
+            upper: None,
+            bounds: "[)".to_string(),
+        };
+        assert!(range.lower.is_some());
+        assert!(range.upper.is_none());
+    }
+
+    #[test]
+    fn test_range_clone() {
+        let range = Range {
+            lower: Some(Box::new(Value::int(1))),
+            upper: Some(Box::new(Value::int(10))),
+            bounds: "[]".to_string(),
+        };
+        let cloned = range.clone();
+        assert_eq!(cloned.bounds, "[]");
+    }
+
+    // ==================== Value Clone Tests ====================
+
+    #[test]
+    fn test_value_clone() {
+        let v = Value::string("test");
+        let cloned = v.clone();
+        assert_eq!(cloned.as_string().unwrap(), "test");
+    }
+
+    #[test]
+    fn test_value_clone_array() {
+        let v = Value::array(vec![Value::int(1), Value::int(2)]);
+        let cloned = v.clone();
+        assert_eq!(cloned.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_value_clone_object() {
+        let mut map = HashMap::new();
+        map.insert("key".to_string(), Value::string("value"));
+        let v = Value::object(map);
+        let cloned = v.clone();
+        assert_eq!(
+            cloned
+                .as_object()
+                .unwrap()
+                .get("key")
+                .unwrap()
+                .as_string()
+                .unwrap(),
+            "value"
+        );
+    }
+
+    // ==================== JSON Round-Trip Tests ====================
+
+    #[test]
+    fn test_json_roundtrip_int() {
+        let original = Value::int(42);
+        let json = original.to_json();
+        let restored = Value::from_json(json);
+        assert_eq!(restored.as_int().unwrap(), 42);
+    }
+
+    #[test]
+    fn test_json_roundtrip_string() {
+        let original = Value::string("hello world");
+        let json = original.to_json();
+        let restored = Value::from_json(json);
+        assert_eq!(restored.as_string().unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_json_roundtrip_bool() {
+        let original = Value::bool(true);
+        let json = original.to_json();
+        let restored = Value::from_json(json);
+        assert!(restored.as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_json_roundtrip_array() {
+        let original = Value::array(vec![Value::int(1), Value::string("two")]);
+        let json = original.to_json();
+        let restored = Value::from_json(json);
+        let arr = restored.as_array().unwrap();
+        assert_eq!(arr[0].as_int().unwrap(), 1);
+        assert_eq!(arr[1].as_string().unwrap(), "two");
+    }
+
+    #[test]
+    fn test_json_roundtrip_object() {
+        let mut map = HashMap::new();
+        map.insert("name".to_string(), Value::string("Alice"));
+        map.insert("age".to_string(), Value::int(30));
+        let original = Value::object(map);
+        let json = original.to_json();
+        let restored = Value::from_json(json);
+        let obj = restored.as_object().unwrap();
+        assert_eq!(obj.get("name").unwrap().as_string().unwrap(), "Alice");
+        assert_eq!(obj.get("age").unwrap().as_int().unwrap(), 30);
+    }
+
+    #[test]
+    fn test_json_roundtrip_null() {
+        let original = Value::null();
+        let json = original.to_json();
+        let restored = Value::from_json(json);
+        assert!(restored.is_null());
+    }
+
+    // ==================== Timestamp Accessor Tests ====================
+
+    #[test]
+    fn test_as_timestamp_from_timestamp() {
+        let v = decode_value(&json!("2024-01-15T10:30:00Z"), "TIMESTAMP").unwrap();
+        let ts = v.as_timestamp().unwrap();
+        assert_eq!(ts.year(), 2024);
+        assert_eq!(ts.month(), 1);
+        assert_eq!(ts.day(), 15);
+    }
+
+    #[test]
+    fn test_as_timestamp_from_timestamptz() {
+        let v = decode_value(&json!("2024-01-15T10:30:00Z"), "TIMESTAMPTZ").unwrap();
+        let ts = v.as_timestamp().unwrap();
+        assert!(ts.hour() == 10);
     }
 }

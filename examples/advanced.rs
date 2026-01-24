@@ -1,8 +1,6 @@
 //! Advanced example demonstrating connection pooling and query builders with QUIC.
 
-use geode_client::{
-    Client, ConnectionPool, EdgeDirection, PatternBuilder, QueryBuilder, Result, Value,
-};
+use geode_client::{ConnectionPool, EdgeDirection, PatternBuilder, QueryBuilder, Result, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio;

@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
 
     // Transaction
     println!("\nStarting transaction...");
-    conn.begin()?;
+    conn.begin().await?;
 
     let mut create_params = std::collections::HashMap::new();
     create_params.insert("name".to_string(), Value::string("Bob"));
@@ -58,11 +58,11 @@ async fn main() -> Result<()> {
         .await
     {
         Ok(_) => {
-            conn.commit()?;
+            conn.commit().await?;
             println!("Transaction committed successfully");
         }
         Err(e) => {
-            conn.rollback()?;
+            conn.rollback().await?;
             println!("Transaction rolled back: {}", e);
         }
     }

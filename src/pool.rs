@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 
 use crate::client::{Client, Connection};
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Connection pool for managing QUIC connections
 pub struct ConnectionPool {
@@ -67,6 +67,11 @@ impl ConnectionPool {
     pub async fn size(&self) -> usize {
         self.connections.lock().await.len()
     }
+
+    /// Get the maximum pool size
+    pub fn max_size(&self) -> usize {
+        self.max_size
+    }
 }
 
 /// A pooled connection that returns to the pool when dropped
@@ -78,7 +83,7 @@ pub struct PooledConnection {
 
 impl PooledConnection {
     /// Get a reference to the underlying connection
-    pub fn as_ref(&self) -> &Connection {
+    pub fn inner(&self) -> &Connection {
         self.connection.as_ref().unwrap()
     }
 }
@@ -106,5 +111,103 @@ impl std::ops::Deref for PooledConnection {
 impl std::ops::DerefMut for PooledConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.connection.as_mut().unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_connection_pool_new() {
+        let pool = ConnectionPool::new("localhost", 3141, 10);
+        assert_eq!(pool.max_size(), 10);
+    }
+
+    #[test]
+    fn test_connection_pool_new_different_host() {
+        let pool = ConnectionPool::new("192.168.1.100", 8443, 5);
+        assert_eq!(pool.max_size(), 5);
+    }
+
+    #[test]
+    fn test_connection_pool_new_string_host() {
+        let host = String::from("geode.example.com");
+        let pool = ConnectionPool::new(host, 3141, 20);
+        assert_eq!(pool.max_size(), 20);
+    }
+
+    #[test]
+    fn test_connection_pool_skip_verify() {
+        let pool = ConnectionPool::new("localhost", 3141, 10).skip_verify(true);
+        // Configuration is passed through to client
+        assert_eq!(pool.max_size(), 10);
+    }
+
+    #[test]
+    fn test_connection_pool_skip_verify_false() {
+        let pool = ConnectionPool::new("localhost", 3141, 10).skip_verify(false);
+        assert_eq!(pool.max_size(), 10);
+    }
+
+    #[test]
+    fn test_connection_pool_page_size() {
+        let pool = ConnectionPool::new("localhost", 3141, 10).page_size(500);
+        assert_eq!(pool.max_size(), 10);
+    }
+
+    #[test]
+    fn test_connection_pool_chained_config() {
+        let pool = ConnectionPool::new("localhost", 3141, 10)
+            .skip_verify(true)
+            .page_size(1000);
+        assert_eq!(pool.max_size(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_connection_pool_initial_size() {
+        let pool = ConnectionPool::new("localhost", 3141, 10);
+        // Pool starts empty
+        assert_eq!(pool.size().await, 0);
+    }
+
+    #[test]
+    fn test_connection_pool_max_size_zero() {
+        // Edge case: pool with zero max size
+        let pool = ConnectionPool::new("localhost", 3141, 0);
+        assert_eq!(pool.max_size(), 0);
+    }
+
+    #[test]
+    fn test_connection_pool_max_size_one() {
+        let pool = ConnectionPool::new("localhost", 3141, 1);
+        assert_eq!(pool.max_size(), 1);
+    }
+
+    #[test]
+    fn test_connection_pool_max_size_large() {
+        let pool = ConnectionPool::new("localhost", 3141, 1000);
+        assert_eq!(pool.max_size(), 1000);
+    }
+
+    // Note: Full integration tests for acquire() require a running Geode server
+    // and are covered in the integration test suite.
+
+    // The following tests verify the structural aspects of PooledConnection
+    // without actually establishing connections.
+
+    #[test]
+    fn test_semaphore_permits_match_max_size() {
+        let pool = ConnectionPool::new("localhost", 3141, 5);
+        // Semaphore should have permits equal to max_size
+        assert_eq!(pool.semaphore.available_permits(), 5);
+    }
+
+    #[test]
+    fn test_connections_vec_initially_empty() {
+        let pool = ConnectionPool::new("localhost", 3141, 10);
+        // We can't directly access the mutex contents in a sync test,
+        // but we verified size() returns 0 in the async test above
+        assert_eq!(pool.max_size(), 10);
     }
 }

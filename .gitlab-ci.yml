@@ -4,21 +4,112 @@
 # =============================================================================
 
 include:
-  - component: gitlab.com/devnw/ci-catalog/rust-lint@latest
+  # Lint: rustfmt and clippy checks
+  - component: gitlab.com/devnw/ci-catalog/rust-lint@~latest
     inputs:
       stage: lint
-      allow_failure: true
 
-  - component: gitlab.com/devnw/ci-catalog/rust-build@latest
+  # Build: compile in release mode
+  - component: gitlab.com/devnw/ci-catalog/rust-build@~latest
     inputs:
       stage: build
+      profile: release
 
-  - component: gitlab.com/devnw/ci-catalog/rust-test@latest
+  # Unit tests
+  - component: gitlab.com/devnw/ci-catalog/rust-test@~latest
     inputs:
       stage: test
-      allow_failure: true  # Tests may require running Geode server
+      test_args: '--lib --no-fail-fast'
+
+  # Property-based tests (proptest)
+  - component: gitlab.com/devnw/ci-catalog/rust-test@~latest
+    inputs:
+      stage: test
+      test_args: '--test proptest --no-fail-fast'
+
+  # Doc tests
+  - component: gitlab.com/devnw/ci-catalog/rust-test@~latest
+    inputs:
+      stage: test
+      test_args: '--doc'
+
+  # Coverage reporting
+  - component: gitlab.com/devnw/ci-catalog/rust-coverage@~latest
+    inputs:
+      stage: coverage
+      tarpaulin_args: '--lib'
+      allow_failure: true
+
+  # Documentation generation
+  - component: gitlab.com/devnw/ci-catalog/rust-doc@~latest
+    inputs:
+      stage: docs
+      publish_pages: true
 
 stages:
   - lint
   - build
   - test
+  - coverage
+  - docs
+
+# -----------------------------------------------------------------------------
+# Integration Tests (requires Geode server)
+# -----------------------------------------------------------------------------
+
+test:integration:
+  stage: test
+  image: rust:latest
+  services:
+    - name: registry.gitlab.com/devnw/geode/geode:latest
+      alias: geode
+      command: ["serve", "--listen", "0.0.0.0:3141", "--log-level", "info"]
+  variables:
+    GEODE_HOST: geode
+    GEODE_PORT: "3141"
+  script:
+    - cargo test --features integration --no-fail-fast -- --test-threads=1
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  allow_failure: true  # Integration tests may fail if container networking issues
+
+# -----------------------------------------------------------------------------
+# Benchmark Job (compile only in CI)
+# -----------------------------------------------------------------------------
+
+benchmark:
+  stage: test
+  image: rust:latest
+  cache:
+    key: "rust-latest-${CI_COMMIT_REF_SLUG}"
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - target/
+    policy: pull
+  script:
+    - cargo bench --no-run
+  artifacts:
+    paths:
+      - target/criterion/
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  allow_failure: true
+
+# -----------------------------------------------------------------------------
+# GitLab Pages (documentation hosting)
+# -----------------------------------------------------------------------------
+
+pages:
+  stage: docs
+  image: rust:latest
+  script:
+    - cargo doc --no-deps
+    - mv target/doc public
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

@@ -1,0 +1,53 @@
+[package]
+name = "geode-client-fuzz"
+version = "0.0.0"
+authors = ["Geode Contributors"]
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1.4", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+
+[dependencies.geode-client]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_value_from_json"
+path = "fuzz_targets/fuzz_value_from_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_query_builder"
+path = "fuzz_targets/fuzz_query_builder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pattern_builder"
+path = "fuzz_targets/fuzz_pattern_builder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_json_parsing"
+path = "fuzz_targets/fuzz_json_parsing.rs"
+test = false
+doc = false
+bench = false

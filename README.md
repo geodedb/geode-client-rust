@@ -101,12 +101,12 @@ let page = conn.query(&query, Some(params)).await?;
 ### Transactions
 
 ```rust
-conn.begin()?;
+conn.begin().await?;
 
-match conn.query("CREATE (p:Person {name: $name})", params) {
-    Ok(_) => conn.commit()?,
+match conn.query("CREATE (p:Person {name: $name})", params).await {
+    Ok(_) => conn.commit().await?,
     Err(e) => {
-        conn.rollback()?;
+        conn.rollback().await?;
         return Err(e);
     }
 }
@@ -115,22 +115,22 @@ match conn.query("CREATE (p:Person {name: $name})", params) {
 ### Savepoints (Partial Rollback)
 
 ```rust
-conn.begin()?;
+conn.begin().await?;
 
 // Create initial data
-conn.query("CREATE (p:Person {name: 'Alice', age: 30})", None)?;
+conn.query("CREATE (p:Person {name: 'Alice', age: 30})").await?;
 
 // Create a savepoint
 let sp = conn.savepoint("before_update")?;
 
 // Make changes
-conn.query("MATCH (p:Person {name: 'Alice'}) SET p.age = 40", None)?;
+conn.query("MATCH (p:Person {name: 'Alice'}) SET p.age = 40").await?;
 
 // Rollback to savepoint (undoes the age change)
-conn.rollback_to(&sp)?;
+conn.rollback_to(&sp).await?;
 
 // Alice's age is still 30
-conn.commit()?;
+conn.commit().await?;
 ```
 
 ### Connection Pooling
@@ -151,6 +151,54 @@ let page = conn.query("RETURN 1", None).await?;
 println!("Pool size: {}", pool.size().await);
 ```
 
+### Prepared Statements
+
+```rust
+use geode_client::PreparedStatement;
+
+// Create a prepared statement
+let stmt = conn.prepare("MATCH (p:Person {id: $id}) RETURN p.name, p.age")?;
+
+// Execute multiple times with different parameters
+for id in 1..=100 {
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), Value::int(id));
+    let (page, _) = stmt.execute(&mut conn, &params).await?;
+    // Process results...
+}
+```
+
+### Query Explain and Profile
+
+```rust
+// Get the execution plan without running the query
+let plan = conn.explain("MATCH (p:Person)-[:KNOWS]->(f) RETURN f").await?;
+println!("Estimated rows: {}", plan.estimated_rows);
+for op in &plan.operations {
+    println!("  {} - {}", op.op_type, op.description);
+}
+
+// Execute with profiling to get actual timing
+let profile = conn.profile("MATCH (p:Person) RETURN p LIMIT 100").await?;
+println!("Execution time: {:.2}ms", profile.execution_time_ms);
+println!("Actual rows: {}", profile.actual_rows);
+```
+
+### Batch Queries
+
+```rust
+// Execute multiple queries efficiently
+let results = conn.batch(&[
+    ("MATCH (n:Person) RETURN count(n)", None),
+    ("MATCH (n:Company) RETURN count(n)", None),
+    ("MATCH ()-[r:WORKS_AT]->() RETURN count(r)", None),
+]).await?;
+
+for (i, page) in results.iter().enumerate() {
+    println!("Query {}: {} rows", i + 1, page.rows.len());
+}
+```
+
 ## Connection Configuration
 
 The client uses a builder pattern for configuration:
@@ -161,8 +209,36 @@ let client = Client::new("127.0.0.1", 3141)  // host and port
     .page_size(1000)                          // Results page size
     .client_name("my-app")                    // Client name for server logs
     .client_version("1.0.0")                  // Client version
-    .conformance("min");                      // GQL conformance level
+    .conformance("min")                       // GQL conformance level
+    .username("admin")                        // Authentication username
+    .password("secret");                      // Authentication password
 ```
+
+### DSN Connection String
+
+You can also create a client from a DSN (Data Source Name) string:
+
+```rust
+use geode_client::Client;
+
+// Simple DSN
+let client = Client::from_dsn("localhost:3141").unwrap();
+
+// With options
+let client = Client::from_dsn("localhost:3141?insecure=true&page_size=500").unwrap();
+
+// URL format with authentication
+let client = Client::from_dsn("geode://admin:secret@localhost:3141?insecure=true").unwrap();
+```
+
+Supported DSN options:
+- `page_size` - Results page size (default: 1000)
+- `hello_name` - Client name (default: "geode-rust-quinn")
+- `hello_ver` - Client version (default: "0.1.0")
+- `conformance` - GQL conformance level (default: "min")
+- `insecure` - Skip TLS verification (true/false, default: false)
+- `username` or `user` - Authentication username
+- `password` or `pass` - Authentication password
 
 ### Configuration Options
 
@@ -171,6 +247,8 @@ let client = Client::new("127.0.0.1", 3141)  // host and port
 - `client_name(String)` - Client name sent to server (default: "geode-rust")
 - `client_version(String)` - Client version (default: "0.1.0")
 - `conformance(String)` - GQL conformance level (default: "min")
+- `username(String)` - Authentication username (optional)
+- `password(String)` - Authentication password (optional)
 
 ## Query Builders
 
@@ -204,18 +282,106 @@ let pattern = PatternBuilder::new()
 
 ## Type System
 
+The client provides a rich type system supporting all GQL data types:
+
 ```rust
-use geode_client::Value;
+use geode_client::{Value, ValueKind};
 
 let value = row.get("count").unwrap();
 
-// Type-safe access
+// Type-safe access with Result
 let int_val = value.as_int()?;
 let str_val = value.as_string()?;
 let bool_val = value.as_bool()?;
 let decimal_val = value.as_decimal()?;
 let array_val = value.as_array()?;
 let object_val = value.as_object()?;
+let date_val = value.as_date()?;
+let timestamp_val = value.as_timestamp()?;
+
+// Check value kind
+match value.kind {
+    ValueKind::Null => println!("null value"),
+    ValueKind::Int => println!("integer: {}", value.as_int()?),
+    ValueKind::String => println!("string: {}", value.as_string()?),
+    _ => println!("other type"),
+}
+
+// Create values programmatically
+let int_value = Value::int(42);
+let str_value = Value::string("hello");
+let bool_value = Value::bool(true);
+let array_value = Value::array(vec![Value::int(1), Value::int(2)]);
+```
+
+### Supported Types
+
+| Type | Rust Type | Description |
+|------|-----------|-------------|
+| `Null` | `()` | SQL NULL |
+| `Int` | `i64` | 64-bit integer |
+| `Bool` | `bool` | Boolean |
+| `String` | `String` | UTF-8 string |
+| `Decimal` | `rust_decimal::Decimal` | Arbitrary precision decimal |
+| `Array` | `Vec<Value>` | Ordered collection |
+| `Object` | `HashMap<String, Value>` | Key-value map |
+| `Date` | `chrono::NaiveDate` | Calendar date |
+| `Timestamp` | `chrono::DateTime<Utc>` | Date and time |
+| `Bytea` | `Vec<u8>` | Binary data |
+
+## Error Handling
+
+The client provides comprehensive error types with retry support:
+
+```rust
+use geode_client::{Error, Result};
+
+async fn query_with_retry(conn: &mut Connection, query: &str) -> Result<Page> {
+    let mut attempts = 0;
+    loop {
+        match conn.query(query).await {
+            Ok((page, _)) => return Ok(page),
+            Err(e) if e.is_retryable() && attempts < 3 => {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(100 * attempts)).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+```
+
+### Error Types
+
+| Error | Retryable | Description |
+|-------|-----------|-------------|
+| `Connection` | Yes | Network/QUIC connection issues |
+| `Query` | Conditional | Query execution errors (40001, 40P01, 40502 are retryable) |
+| `Timeout` | Yes | Operation timed out |
+| `Pool` | Yes | Connection pool exhausted |
+| `Auth` | No | Authentication failure |
+| `Tls` | No | TLS/certificate errors |
+| `Validation` | No | Input validation failure |
+| `Type` | No | Type conversion errors |
+
+### Validation
+
+The client provides input validation utilities:
+
+```rust
+use geode_client::validate;
+
+// Validate queries before sending
+validate::query("MATCH (n) RETURN n")?;
+
+// Validate parameter names
+validate::param_name("user_id")?;
+
+// Validate connection parameters
+validate::hostname("geode.example.com")?;
+validate::port(3141)?;
+validate::page_size(1000)?;
 ```
 
 ## Examples
@@ -239,22 +405,66 @@ cargo run --example transactions
 ```bash
 # Build
 cargo build
+cargo build --release
 
 # Run tests
-cargo test
+cargo test                           # Unit tests (274 tests)
+cargo test --test proptest           # Property-based tests (28 tests)
+cargo test --features integration    # Integration tests (requires Geode server)
+
+# Run benchmarks
+cargo bench                          # All benchmarks (59 benchmarks)
+cargo bench -- "query"               # Filter by name
+
+# Run fuzzing (requires nightly)
+cargo +nightly fuzz run fuzz_value_from_json
+
+# Code quality
+cargo fmt                            # Format code
+cargo clippy                         # Lint (0 warnings)
+cargo doc --open                     # Generate documentation
 
 # Run examples
 cargo run --example basic
 cargo run --example advanced
+```
 
-# Format code
-cargo fmt
+## Testing
 
-# Lint
-cargo clippy
+The library includes comprehensive testing:
 
-# Check types
-cargo check
+| Test Type | Count | Command |
+|-----------|-------|---------|
+| Unit tests | 274 | `cargo test` |
+| Property tests | 28 | `cargo test --test proptest` |
+| Integration tests | 36 | `cargo test --features integration` |
+| Benchmarks | 59 | `cargo bench` |
+| Fuzz targets | 4 | `cargo +nightly fuzz run <target>` |
+
+### Running Integration Tests
+
+Integration tests require a running Geode server:
+
+```bash
+# Terminal 1: Start Geode
+cd ../geode && ./zig-out/bin/geode serve
+
+# Terminal 2: Run integration tests
+cargo test --features integration
+```
+
+### Benchmarks
+
+Benchmarks measure performance of key operations:
+
+```bash
+# Run all benchmarks
+cargo bench
+
+# Sample output:
+# value_creation/int      time: [5.2 ns]
+# query_builder/complex   time: [198 ns]
+# decimal_parsing/4_places time: [8.3 ns]
 ```
 
 ## Performance
@@ -285,6 +495,43 @@ let client = Client::new("localhost", 3141).skip_verify(true);
 ```
 
 For production, ensure proper TLS certificates are configured on the server.
+
+## Contributing
+
+Contributions are welcome! Please follow these guidelines:
+
+1. **Fork and clone** the repository
+2. **Create a feature branch** from `main`
+3. **Write tests** for new functionality
+4. **Run the test suite**: `cargo test`
+5. **Run clippy**: `cargo clippy` (must produce 0 warnings)
+6. **Format code**: `cargo fmt`
+7. **Submit a pull request**
+
+### Code Quality Standards
+
+- All public APIs must have rustdoc comments
+- New features require unit tests
+- Integration tests for server-facing changes
+- Property-based tests for parsers/converters
+- Benchmarks for performance-critical code
+
+### Development Setup
+
+```bash
+# Clone the repository
+git clone https://gitlab.com/devnw/codepros/geode/geode-client-rust.git
+cd geode-client-rust
+
+# Install development tools
+rustup component add clippy rustfmt
+
+# Run full test suite
+cargo test
+cargo test --test proptest
+cargo clippy
+cargo fmt -- --check
+```
 
 ## License
 
