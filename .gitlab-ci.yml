@@ -55,13 +55,16 @@ stages:
 
 # -----------------------------------------------------------------------------
 # Integration Tests (requires Geode server)
+# NOTE: This job requires the Geode Docker image to be published.
+# Until the image is available, this job will fail but won't block the pipeline.
+# To enable: publish geode image to registry.gitlab.com/devnw/codepros/geode/geode
 # -----------------------------------------------------------------------------
 
 test:integration:
   stage: test
   image: rust:latest
   services:
-    - name: registry.gitlab.com/devnw/geode/geode:latest
+    - name: $CI_REGISTRY/devnw/codepros/geode/geode:latest
       alias: geode
       command: ["serve", "--listen", "0.0.0.0:3141", "--log-level", "info"]
   variables:
@@ -72,7 +75,7 @@ test:integration:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-  allow_failure: true  # Integration tests may fail if container networking issues
+  allow_failure: true  # Fails until Geode Docker image is published
 
 # -----------------------------------------------------------------------------
 # Benchmark Job (compile only in CI)
