@@ -33,15 +33,15 @@ include:
       stage: test
       test_args: '--doc'
 
-  # Coverage reporting
-  - component: gitlab.com/devnw/ci-catalog/rust-coverage@~latest
+  # Coverage reporting (v1.8.0+ required)
+  - component: gitlab.com/devnw/ci-catalog/rust-coverage@v1.8.0
     inputs:
       stage: coverage
       tarpaulin_args: '--lib'
       allow_failure: true
 
-  # Documentation generation
-  - component: gitlab.com/devnw/ci-catalog/rust-doc@~latest
+  # Documentation generation (v1.8.0+ required)
+  - component: gitlab.com/devnw/ci-catalog/rust-doc@v1.8.0
     inputs:
       stage: docs
       publish_pages: true
