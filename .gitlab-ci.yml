@@ -46,12 +46,23 @@ include:
       stage: docs
       publish_pages: true
 
+  # Release creation
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@latest
+    inputs:
+      stage: release
+
+default:
+  tags:
+    - company
+    - linux
+
 stages:
   - lint
   - build
   - test
   - coverage
   - docs
+  - release
 
 # -----------------------------------------------------------------------------
 # Integration Tests (requires Geode server)
