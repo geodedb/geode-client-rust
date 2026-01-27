@@ -870,6 +870,25 @@ impl Connection {
             .map_err(|e| Error::connection(format!("Invalid JSON response: {}", e)))
     }
 
+    /// Attempt to read an already-buffered JSON line without blocking.
+    /// Returns Ok(None) if no complete line is available immediately.
+    async fn try_read_json_line(&mut self) -> Result<Option<serde_json::Value>> {
+        let mut line = String::new();
+        let read_result = timeout(Duration::from_millis(1), self.reader.read_line(&mut line)).await;
+        match read_result {
+            Ok(res) => {
+                let n = res.map_err(|e| Error::connection(format!("Failed to read response: {}", e)))?;
+                if n == 0 {
+                    return Err(Error::connection("Connection closed"));
+                }
+                let value = serde_json::from_str(&line)
+                    .map_err(|e| Error::connection(format!("Invalid JSON response: {}", e)))?;
+                Ok(Some(value))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
     fn parse_rows(
         &self,
         rows_value: &serde_json::Value,
@@ -1067,6 +1086,84 @@ impl Connection {
 
         if std::env::var("GEODE_RUST_DEBUG").is_ok() {
             eprintln!("[QUINN] Columns: {:?}", columns);
+        }
+
+        // Check for an inline BINDINGS frame already buffered (schema + bindings in one response).
+        if let Some(inline_frame) = self.try_read_json_line().await? {
+            let inline_result = inline_frame
+                .get("result")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let inline_type = inline_result
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+
+            match inline_type {
+                "BINDINGS" => {
+                    let ordered = inline_result
+                        .get("ordered")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let order_keys: Vec<String> = inline_result
+                        .get("order_keys")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let rows = self.parse_rows(
+                        inline_result
+                            .get("rows")
+                            .unwrap_or(&serde_json::Value::Array(vec![])),
+                        &columns,
+                    )?;
+                    let final_page = inline_result
+                        .get("final")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    let page = Page {
+                        columns,
+                        rows,
+                        ordered,
+                        order_keys,
+                        final_page,
+                    };
+                    return Ok((page, None));
+                }
+                "RESULT" | "STATUS" | "PROFILE" => {
+                    let page = Page {
+                        columns,
+                        rows: Vec::new(),
+                        ordered: false,
+                        order_keys: Vec::new(),
+                        final_page: true,
+                    };
+                    return Ok((page, None));
+                }
+                "ERROR" => {
+                    let code = inline_result
+                        .get("code")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("UNKNOWN");
+                    let msg = inline_result
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Query failed");
+                    return Err(Error::Query {
+                        code: code.to_string(),
+                        message: msg.to_string(),
+                    });
+                }
+                other => {
+                    return Err(Error::protocol(format!(
+                        "Unexpected inline frame: {}",
+                        other
+                    )));
+                }
+            }
         }
 
         let request_id = self.next_request_id;
