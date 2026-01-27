@@ -75,7 +75,7 @@ include:
 
   # Publish to crates.io (triggered on version tags)
   # Uses CARGO_REGISTRY_TOKEN CI/CD variable
-  - component: gitlab.com/devnw/ci-catalog/rust-publish@latest
+  - component: gitlab.com/devnw/ci-catalog/rust-publish@v1.9.9
     inputs:
       stage: publish
       needs: rust-build
