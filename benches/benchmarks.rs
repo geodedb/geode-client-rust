@@ -5,7 +5,7 @@
 //! For benchmarks that require a Geode server, set GEODE_HOST and GEODE_PORT
 //! environment variables, or the benchmarks will be skipped.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use geode_client::{Client, EdgeDirection, PatternBuilder, PredicateBuilder, QueryBuilder, Value};
 use rust_decimal::Decimal;
 use std::collections::HashMap;

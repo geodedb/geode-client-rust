@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 use crate::error::{Error, Result};
 use crate::types::Value;

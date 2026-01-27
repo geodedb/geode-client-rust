@@ -4,8 +4,8 @@
 
 use geode_client::{Client, Result};
 use serde::Serialize;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
