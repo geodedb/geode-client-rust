@@ -25,7 +25,7 @@ Or add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-geode-client = "0.1.1-alpha.5"
+geode-client = "0.1.1-alpha.6"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -571,4 +571,4 @@ Apache License 2.0 - see [LICENSE](LICENSE) file for details.
 - [Python Client](https://gitlab.com/devnw/codepros/geode/geode-client-python) - Official Python client
 - [Go Client](https://gitlab.com/devnw/codepros/geode/geode-client-go) - Official Go client
 - [crates.io](https://crates.io/crates/geode-client) - Package on crates.io
-- [docs.rs](https://docs.rs/geode-client) - API documentation
+- [Documentation](https://gitlab.com/devnw/codepros/geode/geode-client-rust) - API documentation
