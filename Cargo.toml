@@ -1,13 +1,17 @@
 [package]
 name = "geode-client"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
-authors = ["Geode Contributors"]
+rust-version = "1.70"
+authors = ["Geode Contributors <info@codepros.org>"]
 description = "Rust client library for Geode graph database with full GQL support"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://gitlab.com/devnw/codepros/geode/geode-client-rust"
-keywords = ["database", "graph", "gql", "geode"]
-categories = ["database"]
+homepage = "https://geode.dev"
+documentation = "https://docs.rs/geode-client"
+readme = "README.md"
+keywords = ["database", "graph", "gql", "geode", "quic"]
+categories = ["database", "asynchronous"]
 
 [dependencies]
 # Async runtime

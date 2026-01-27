@@ -15,13 +15,17 @@ A high-performance async Rust client library for [Geode](https://gitlab.com/devn
 
 ## Installation
 
-Add to your `Cargo.toml`:
+Install from [crates.io](https://crates.io/crates/geode-client):
+
+```bash
+cargo add geode-client tokio --features tokio/full
+```
+
+Or add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-geode-client = "0.1"
-
-# For async runtime
+geode-client = "0.1.0-alpha.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -476,6 +480,30 @@ The QUIC client provides:
 - **Zero-cost abstractions**: Minimal overhead from Rust's type system
 - **Concurrent**: Full async support for parallel queries
 
+### System-Level QUIC Optimizations
+
+For optimal QUIC throughput on high-bandwidth connections, configure UDP buffer sizes at the OS level.
+
+**Linux:**
+```bash
+# Increase UDP buffer sizes to 7MB
+sudo sysctl -w net.core.rmem_max=7340032
+sudo sysctl -w net.core.wmem_max=7340032
+
+# Persist across reboots
+echo "net.core.rmem_max=7340032" | sudo tee -a /etc/sysctl.d/99-geode-quic.conf
+echo "net.core.wmem_max=7340032" | sudo tee -a /etc/sysctl.d/99-geode-quic.conf
+```
+
+**BSD/macOS:**
+```bash
+sudo sysctl -w kern.ipc.maxsockbuf=8441037
+```
+
+**GSO (Generic Segmentation Offload)**: Automatically enabled on Linux 4.18+ by quinn. Batches UDP packets to reduce syscall overhead.
+
+**Path MTU Discovery (DPLPMTUD)**: Enabled by default in quinn, probes for optimal packet sizes to reduce per-packet overhead.
+
 ## Troubleshooting
 
 ### Connection Refused
@@ -535,10 +563,12 @@ cargo fmt -- --check
 
 ## License
 
-MIT License - see LICENSE file for details.
+Apache License 2.0 - see [LICENSE](LICENSE) file for details.
 
 ## Related
 
 - [Geode Database](https://gitlab.com/devnw/codepros/geode/geode) - Main Geode project
-- [Python Client](../python/) - Official Python client
-- [Go Client](../go/) - Official Go client
+- [Python Client](https://gitlab.com/devnw/codepros/geode/geode-client-python) - Official Python client
+- [Go Client](https://gitlab.com/devnw/codepros/geode/geode-client-go) - Official Go client
+- [crates.io](https://crates.io/crates/geode-client) - Package on crates.io
+- [docs.rs](https://docs.rs/geode-client) - API documentation
