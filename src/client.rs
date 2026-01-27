@@ -877,7 +877,8 @@ impl Connection {
         let read_result = timeout(Duration::from_millis(1), self.reader.read_line(&mut line)).await;
         match read_result {
             Ok(res) => {
-                let n = res.map_err(|e| Error::connection(format!("Failed to read response: {}", e)))?;
+                let n =
+                    res.map_err(|e| Error::connection(format!("Failed to read response: {}", e)))?;
                 if n == 0 {
                     return Err(Error::connection("Connection closed"));
                 }

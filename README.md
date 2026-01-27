@@ -25,7 +25,7 @@ Or add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-geode-client = "0.1.1-alpha.2"
+geode-client = "0.1.1-alpha.3"
 tokio = { version = "1", features = ["full"] }
 ```
 

@@ -1,6 +1,6 @@
 [package]
 name = "geode-client"
-version = "0.1.1-alpha.2"
+version = "0.1.1-alpha.3"
 edition = "2021"
 rust-version = "1.70"
 authors = ["Geode Contributors <info@codepros.org>"]
