@@ -58,6 +58,10 @@ path = "examples/advanced.rs"
 name = "test_quinn"
 path = "examples/test_quinn.rs"
 
+[[example]]
+name = "benchmark"
+path = "examples/benchmark.rs"
+
 [lib]
 name = "geode_client"
 path = "src/lib.rs"

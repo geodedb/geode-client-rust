@@ -587,6 +587,7 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
+    // CANARY: REQ=REQ-CLIENT-RUST-001; FEATURE="RustClientConnection"; ASPECT=HelloHandshake; STATUS=IMPL; OWNER=clients; UPDATED=2025-02-14
     pub async fn connect(&self) -> Result<Connection> {
         Connection::new(
             &self.host,
