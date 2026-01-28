@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
     println!("[TEST] Using server address: {}", server_addr);
 
     let parts: Vec<&str> = server_addr.split(':').collect();
-    let host = parts.get(0).unwrap_or(&"127.0.0.1");
+    let host = parts.first().unwrap_or(&"127.0.0.1");
     let port: u16 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(3141);
 
     let client = Client::new(*host, port)

@@ -386,12 +386,7 @@ fn bench_query_execution(c: &mut Criterion) {
     let client = Client::new(&host, port).skip_verify(true);
 
     // Quick connectivity check and setup
-    let conn = rt.block_on(async {
-        match client.connect().await {
-            Ok(conn) => Some(conn),
-            Err(_) => None,
-        }
-    });
+    let conn = rt.block_on(async { client.connect().await.ok() });
 
     let mut conn = match conn {
         Some(c) => c,
@@ -479,12 +474,7 @@ fn bench_query_throughput(c: &mut Criterion) {
 
     let client = Client::new(&host, port).skip_verify(true);
 
-    let conn = rt.block_on(async {
-        match client.connect().await {
-            Ok(conn) => Some(conn),
-            Err(_) => None,
-        }
-    });
+    let conn = rt.block_on(async { client.connect().await.ok() });
 
     let mut conn = match conn {
         Some(c) => c,

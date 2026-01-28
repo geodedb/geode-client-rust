@@ -8,11 +8,13 @@
 <!-- Describe what you've already attempted -->
 
 ## Code Example
+
 ```rust
 // Relevant code if applicable
 ```
 
 ## Environment
+
 - **Rust Version**:
 - **Library Version/Commit**:
 

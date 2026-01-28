@@ -8,7 +8,7 @@ async fn main() -> Result<()> {
     eprintln!("=== Starting Quiche Connection Debug Test ===");
     eprintln!("Target: localhost:19999");
     eprintln!("TLS Verification: SKIP (insecure)");
-    eprintln!("");
+    eprintln!();
 
     let client = Client::new("localhost", 19999)
         .skip_verify(true)
@@ -16,17 +16,17 @@ async fn main() -> Result<()> {
         .client_version("0.1.0");
 
     eprintln!("Client configured. Attempting connection...");
-    eprintln!("");
+    eprintln!();
 
     match client.connect().await {
         Ok(_conn) => {
-            eprintln!("");
+            eprintln!();
             eprintln!("✓ CONNECTION SUCCESSFUL!");
             eprintln!("Connection established successfully");
             Ok(())
         }
         Err(e) => {
-            eprintln!("");
+            eprintln!();
             eprintln!("✗ CONNECTION FAILED!");
             eprintln!("Error: {:?}", e);
             std::process::exit(1);

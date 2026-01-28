@@ -587,7 +587,7 @@ async fn test_docker_bidirectional_relationships() {
         .unwrap();
 
     // Should find Bob via either direction
-    assert!(page.rows.len() >= 1);
+    assert!(!page.rows.is_empty());
 
     cleanup_test_data(&mut conn).await;
     conn.close().unwrap();

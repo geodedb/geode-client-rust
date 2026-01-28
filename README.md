@@ -236,6 +236,7 @@ let client = Client::from_dsn("geode://admin:secret@localhost:3141?insecure=true
 ```
 
 Supported DSN options:
+
 - `page_size` - Results page size (default: 1000)
 - `hello_name` - Client name (default: "geode-rust-quinn")
 - `hello_ver` - Client version (default: "0.1.0")
@@ -485,6 +486,7 @@ The QUIC client provides:
 For optimal QUIC throughput on high-bandwidth connections, configure UDP buffer sizes at the OS level.
 
 **Linux:**
+
 ```bash
 # Increase UDP buffer sizes to 7MB
 sudo sysctl -w net.core.rmem_max=7340032
@@ -496,6 +498,7 @@ echo "net.core.wmem_max=7340032" | sudo tee -a /etc/sysctl.d/99-geode-quic.conf
 ```
 
 **BSD/macOS:**
+
 ```bash
 sudo sysctl -w kern.ipc.maxsockbuf=8441037
 ```

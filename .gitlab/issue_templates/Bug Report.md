@@ -2,11 +2,13 @@
 <!-- A clear and concise description of the bug -->
 
 ## Environment
+
 - **Rust Version**:
 - **OS**:
 - **Library Version/Commit**:
 
 ## Steps to Reproduce
+
 1.
 2.
 3.
@@ -18,12 +20,14 @@
 <!-- What actually happened -->
 
 ## Minimal Reproducible Example
+
 ```rust
 // Paste minimal code that reproduces the issue
 ```
 
 ## Error Output
-```
+
+```text
 // Paste any error messages or stack traces
 ```
 

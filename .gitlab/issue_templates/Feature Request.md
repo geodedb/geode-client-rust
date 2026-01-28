@@ -11,6 +11,7 @@
 <!-- Any alternative solutions or features you've considered -->
 
 ## API Design (if applicable)
+
 ```rust
 // Proposed API or interface changes
 ```

@@ -49,7 +49,7 @@ cargo run --example test_quinn
 
 ## Project Structure
 
-```
+```text
 src/
 ├── lib.rs           # Library entry point, re-exports
 ├── client.rs        # QUIC client, Connection, query execution
@@ -72,12 +72,14 @@ The client module handles QUIC connections using Quinn:
 - **Page/Column**: Query result structures
 
 **Connection Flow:**
-```
+
+```text
 Client::new() -> configure -> connect() -> Connection
 Connection: query() / query_with_params() / begin() / commit() / rollback()
 ```
 
 **Protocol:**
+
 - ALPN: `b"geode/1"`
 - Wire format: JSON line protocol (one JSON object per line)
 - Handshake: HELLO message exchange
@@ -96,6 +98,7 @@ Connection: query() / query_with_params() / begin() / commit() / rollback()
 | Special | Json, Jsonb, Xml, Url, Domain, Uuid, Enum, BitString, Range |
 
 **Key Functions:**
+
 - `Value::from_json()` / `Value::to_json()` - JSON conversion
 - `decode_value(raw, type_name)` - Type-aware decoding from server
 - `as_int()`, `as_string()`, etc. - Type-safe accessors
@@ -116,6 +119,7 @@ let (query, params) = QueryBuilder::new()
 ```
 
 **PatternBuilder** for graph patterns:
+
 ```rust
 let pattern = PatternBuilder::new()
     .node("a", "Person")
@@ -215,18 +219,22 @@ cargo test test_error_is_retryable
 ## Dependencies
 
 ### Core
+
 - `tokio` (1.35) - Async runtime
 - `quinn` (0.11) - Pure Rust QUIC
 - `rustls` (0.23) - TLS 1.3 with AWS-LC-RS crypto
 
 ### Serialization
+
 - `serde` + `serde_json` - JSON handling
 
 ### Types
+
 - `rust_decimal` (1.33) - Decimal precision
 - `chrono` (0.4) - Temporal types
 
 ### Error Handling
+
 - `thiserror` (1.0) - Derive Error trait
 
 ## Code Style
@@ -306,6 +314,7 @@ Located in `fuzz/fuzz_targets/`, these use libFuzzer for deep fuzzing:
 | `fuzz_json_parsing` | JSON parsing and Value conversion |
 
 Run with:
+
 ```bash
 cargo +nightly fuzz run fuzz_value_from_json
 cargo +nightly fuzz run fuzz_value_from_json -- -max_total_time=60

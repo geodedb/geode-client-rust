@@ -3,7 +3,6 @@
 use geode_client::{ConnectionPool, EdgeDirection, PatternBuilder, QueryBuilder, Result, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio;
 
 #[tokio::main]
 async fn main() -> Result<()> {
