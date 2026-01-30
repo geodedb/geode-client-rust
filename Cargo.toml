@@ -21,6 +21,10 @@ tokio = { version = "1.35", features = ["full"] }
 quinn = "0.11"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 rustls-pemfile = "2.0"
+rustls-native-certs = "0.8"  # Load system root certificates for TLS verification
+
+# Security
+secrecy = "0.10"  # Zeroize sensitive data on drop
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

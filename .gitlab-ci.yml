@@ -5,71 +5,71 @@
 
 include:
   # Lint: rustfmt and clippy checks
-  - component: gitlab.com/devnw/ci-catalog/rust-lint@~latest
+  # Pinned to v1.9.15 for supply chain security (CWE-1104)
+  - component: gitlab.com/devnw/ci-catalog/rust-lint@v1.9.15
     inputs:
       stage: lint
 
   # Build: compile in release mode
-  - component: gitlab.com/devnw/ci-catalog/rust-build@~latest
+  - component: gitlab.com/devnw/ci-catalog/rust-build@v1.9.15
     inputs:
       stage: build
       profile: release
 
   # Unit tests
-  - component: gitlab.com/devnw/ci-catalog/rust-test@~latest
+  - component: gitlab.com/devnw/ci-catalog/rust-test@v1.9.15
     inputs:
       stage: test
       test_args: '--lib --no-fail-fast'
 
   # Property-based tests (proptest)
-  - component: gitlab.com/devnw/ci-catalog/rust-test@~latest
+  - component: gitlab.com/devnw/ci-catalog/rust-test@v1.9.15
     inputs:
       stage: test
       test_args: '--test proptest --no-fail-fast'
 
   # Doc tests
-  - component: gitlab.com/devnw/ci-catalog/rust-test@~latest
+  - component: gitlab.com/devnw/ci-catalog/rust-test@v1.9.15
     inputs:
       stage: test
       test_args: '--doc'
 
-  # Coverage reporting (v1.8.0+ required)
-  - component: gitlab.com/devnw/ci-catalog/rust-coverage@v1.8.0
+  # Coverage reporting
+  - component: gitlab.com/devnw/ci-catalog/rust-coverage@v1.9.15
     inputs:
       stage: coverage
       tarpaulin_args: '--lib'
       allow_failure: true
 
-  # Documentation generation (v1.8.0+ required)
-  - component: gitlab.com/devnw/ci-catalog/rust-doc@v1.8.0
+  # Documentation generation
+  - component: gitlab.com/devnw/ci-catalog/rust-doc@v1.9.15
     inputs:
       stage: docs
       publish_pages: true
 
-  # Security scanning
-  - component: gitlab.com/devnw/ci-catalog/security-sast@latest
+  # Security scanning - pinned versions for supply chain security
+  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.9.15
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@latest
+  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.9.15
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-secrets@latest
+  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.9.15
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@latest
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.9.15
 
   # SBOM generation and scanning
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@latest
+  # Security scan jobs MUST NOT use allow_failure (Gap #14)
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.9.15
 
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@latest
-    inputs:
-      allow_failure: true
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.9.15
 
   # Release creation
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@latest
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.9.15
     inputs:
       stage: release
 
@@ -95,6 +95,28 @@ stages:
   - sbom
   - release
   - publish
+
+# -----------------------------------------------------------------------------
+# Rust Dependency Vulnerability Scanning (cargo-audit)
+# Scans Cargo.lock for known vulnerabilities in RustSec Advisory Database
+# -----------------------------------------------------------------------------
+
+security:cargo-audit:
+  stage: security
+  image: rust:1.85-bookworm
+  before_script:
+    - cargo install cargo-audit --locked
+  script:
+    - cargo audit --deny warnings
+  cache:
+    key: cargo-audit-${CI_COMMIT_REF_SLUG}
+    paths:
+      - $CARGO_HOME/bin/
+      - $CARGO_HOME/registry/
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
 
 # -----------------------------------------------------------------------------
 # Integration Tests (requires Geode server)

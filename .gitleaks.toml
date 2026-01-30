@@ -8,12 +8,21 @@ title = "Gitleaks Configuration"
 useDefault = true
 
 [allowlist]
-description = "Global allowlist"
+description = "Global allowlist - only exclude build artifacts and logs"
 paths = [
-  '''testdata''',
-  '''tests/.*''',
   '''target''',
-  '''.*\.rs$''',
-  '''.*\.md$''',
   '''.*\.log$''',
 ]
+
+# Allowlist specific test patterns that are known false positives
+[[rules]]
+id = "test-fixture-passwords"
+description = "Test fixtures with example/placeholder credentials"
+regex = '''(?i)(test_password|example_secret|placeholder)'''
+allowlist = { paths = ['''tests/.*'''] }
+
+[[rules]]
+id = "documentation-examples"
+description = "Documentation examples showing DSN format"
+regex = '''geode://[^:]+:secret@'''
+allowlist = { paths = ['''.*\.md$''', '''examples/.*'''] }

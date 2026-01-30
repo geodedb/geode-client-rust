@@ -55,10 +55,17 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
+# Create non-root user for security (CWE-250)
+RUN groupadd --gid 1000 geode && \
+    useradd --uid 1000 --gid 1000 --shell /bin/false --create-home geode
+
 # Copy built artifacts
-COPY --from=builder /build/target/release /artifacts
+COPY --from=builder --chown=geode:geode /build/target/release /artifacts
 
 WORKDIR /artifacts
+
+# Switch to non-root user
+USER geode
 
 # Default command
 CMD ["ls", "-lh"]

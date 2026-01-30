@@ -1,8 +1,10 @@
 //! Geode client implementation using Quinn library for QUIC transport.
 //! Switched back to Quinn from Quiche for better MsQuic compatibility.
 
+use log::{debug, trace, warn};
 use quinn::{ClientConfig, Endpoint};
 use rustls::pki_types::{CertificateDer, ServerName as RustlsServerName};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -12,8 +14,59 @@ use tokio::time::{Duration, timeout};
 
 use crate::error::{Error, Result};
 use crate::types::Value;
+use crate::validate;
 
 const GEODE_ALPN: &[u8] = b"geode/1";
+
+/// Redact password from a DSN string for safe inclusion in error messages.
+/// Handles both URL format (geode://user:pass@host) and query parameter format (?password=xxx).
+fn redact_dsn(dsn: &str) -> String {
+    let mut result = dsn.to_string();
+
+    // Handle URL format: scheme://user:password@host:port
+    // Look for pattern user:password@ and redact the password
+    if let Some(scheme_end) = result.find("://") {
+        let after_scheme = scheme_end + 3;
+        if let Some(at_pos) = result[after_scheme..].find('@') {
+            let auth_section = &result[after_scheme..after_scheme + at_pos];
+            if let Some(colon_pos) = auth_section.find(':') {
+                // Found user:password pattern
+                let user = &auth_section[..colon_pos];
+                let rest_start = after_scheme + at_pos;
+                result = format!(
+                    "{}{}:{}{}",
+                    &result[..after_scheme],
+                    user,
+                    "[REDACTED]",
+                    &result[rest_start..]
+                );
+            }
+        }
+    }
+
+    // Handle query parameter format: host:port?password=xxx
+    // Redact password= and pass= parameters (only check once per pattern to avoid loops)
+    let patterns = ["password=", "pass="];
+    for pattern in patterns {
+        let lower = result.to_lowercase();
+        if let Some(start) = lower.find(pattern) {
+            let value_start = start + pattern.len();
+            // Find end of value (& or end of string)
+            let value_end = result[value_start..]
+                .find('&')
+                .map(|i| value_start + i)
+                .unwrap_or(result.len());
+
+            result = format!(
+                "{}[REDACTED]{}",
+                &result[..value_start],
+                &result[value_end..]
+            );
+        }
+    }
+
+    result
+}
 
 /// A column definition in a query result set.
 ///
@@ -253,6 +306,11 @@ pub struct QueryProfile {
 /// # Ok(())
 /// # }
 /// ```
+/// Client configuration for connecting to a Geode server.
+///
+/// The password field uses `SecretString` from the `secrecy` crate to ensure
+/// credentials are zeroized from memory on drop and not accidentally leaked
+/// in debug output or error messages.
 #[derive(Clone)]
 pub struct Client {
     host: String,
@@ -263,7 +321,15 @@ pub struct Client {
     hello_ver: String,
     conformance: String,
     username: Option<String>,
-    password: Option<String>,
+    /// Password stored using SecretString for secure memory handling (CWE-316).
+    /// Automatically zeroized on drop and redacted in Debug output.
+    password: Option<SecretString>,
+    /// Connection timeout in seconds (default: 10)
+    connect_timeout_secs: u64,
+    /// HELLO handshake timeout in seconds (default: 5)
+    hello_timeout_secs: u64,
+    /// Idle connection timeout in seconds (default: 30)
+    idle_timeout_secs: u64,
 }
 
 impl Client {
@@ -294,6 +360,9 @@ impl Client {
             conformance: "min".to_string(),
             username: None,
             password: None,
+            connect_timeout_secs: 10,
+            hello_timeout_secs: 5,
+            idle_timeout_secs: 30,
         }
     }
 
@@ -344,9 +413,14 @@ impl Client {
     fn parse_url_dsn(dsn: &str) -> Result<Self> {
         use std::collections::HashMap;
 
-        // Parse as URL
-        let url = url::Url::parse(dsn)
-            .map_err(|e| Error::invalid_dsn(format!("Invalid URL format: {}", e)))?;
+        // Parse as URL - use redacted DSN in error message to prevent password exposure
+        let url = url::Url::parse(dsn).map_err(|e| {
+            Error::invalid_dsn(format!(
+                "Invalid URL format in '{}': {}",
+                redact_dsn(dsn),
+                e
+            ))
+        })?;
 
         let host = url
             .host_str()
@@ -367,9 +441,10 @@ impl Client {
         };
 
         let password = url.password().map(|p| {
-            urlencoding::decode(p)
+            let decoded = urlencoding::decode(p)
                 .map(|s| s.into_owned())
-                .unwrap_or_else(|_| p.to_string())
+                .unwrap_or_else(|_| p.to_string());
+            SecretString::from(decoded)
         });
 
         // Parse query parameters
@@ -457,7 +532,7 @@ impl Client {
                     client.username = Some(value.clone());
                 }
                 "password" | "pass" => {
-                    client.password = Some(value.clone());
+                    client.password = Some(SecretString::from(value.clone()));
                 }
                 _ => {
                     // Ignore unknown parameters for forward compatibility
@@ -550,12 +625,95 @@ impl Client {
 
     /// Set the authentication password.
     ///
+    /// The password is stored using `SecretString` which ensures it is:
+    /// - Zeroized from memory when dropped
+    /// - Not accidentally leaked in debug output
+    ///
     /// # Arguments
     ///
     /// * `password` - The password for authentication
     pub fn password(mut self, password: impl Into<String>) -> Self {
-        self.password = Some(password.into());
+        self.password = Some(SecretString::from(password.into()));
         self
+    }
+
+    /// Set the connection timeout in seconds.
+    ///
+    /// This controls how long to wait for the initial QUIC connection
+    /// to be established. Default is 10 seconds.
+    ///
+    /// # Arguments
+    ///
+    /// * `seconds` - Timeout in seconds (must be > 0)
+    pub fn connect_timeout(mut self, seconds: u64) -> Self {
+        self.connect_timeout_secs = seconds.max(1);
+        self
+    }
+
+    /// Set the HELLO handshake timeout in seconds.
+    ///
+    /// This controls how long to wait for the server to respond to the
+    /// initial HELLO message. Default is 5 seconds.
+    ///
+    /// # Arguments
+    ///
+    /// * `seconds` - Timeout in seconds (must be > 0)
+    pub fn hello_timeout(mut self, seconds: u64) -> Self {
+        self.hello_timeout_secs = seconds.max(1);
+        self
+    }
+
+    /// Set the idle connection timeout in seconds.
+    ///
+    /// This controls how long an idle connection can remain open before
+    /// being automatically closed by the QUIC layer. Default is 30 seconds.
+    ///
+    /// # Arguments
+    ///
+    /// * `seconds` - Timeout in seconds (must be > 0)
+    pub fn idle_timeout(mut self, seconds: u64) -> Self {
+        self.idle_timeout_secs = seconds.max(1);
+        self
+    }
+
+    /// Validate the client configuration.
+    ///
+    /// Performs validation on all configuration parameters including:
+    /// - Hostname format (RFC 1035 compliant)
+    /// - Port number (1-65535)
+    /// - Page size (1-100,000)
+    ///
+    /// This method is automatically called by [`connect`](Self::connect).
+    /// You can call it manually to validate configuration before attempting
+    /// to connect.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error if any parameter is invalid.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use geode_client::Client;
+    ///
+    /// let client = Client::new("localhost", 3141);
+    /// assert!(client.validate().is_ok());
+    ///
+    /// // Invalid hostname
+    /// let invalid = Client::new("-invalid-host", 3141);
+    /// assert!(invalid.validate().is_err());
+    /// ```
+    pub fn validate(&self) -> Result<()> {
+        // Validate hostname format
+        validate::hostname(&self.host)?;
+
+        // Validate port (0 is reserved)
+        validate::port(self.port)?;
+
+        // Validate page size
+        validate::page_size(self.page_size)?;
+
+        Ok(())
     }
 
     /// Connect to the Geode database.
@@ -589,6 +747,12 @@ impl Client {
     /// ```
     // CANARY: REQ=REQ-CLIENT-RUST-001; FEATURE="RustClientConnection"; ASPECT=HelloHandshake; STATUS=IMPL; OWNER=clients; UPDATED=2025-02-14
     pub async fn connect(&self) -> Result<Connection> {
+        // Validate configuration before connecting (Gap #9 - automatic validation)
+        self.validate()?;
+
+        // Expose the secret password only when needed for the connection
+        let password_ref = self.password.as_ref().map(|s| s.expose_secret());
+
         Connection::new(
             &self.host,
             self.port,
@@ -598,7 +762,10 @@ impl Client {
             &self.hello_ver,
             &self.conformance,
             self.username.as_deref(),
-            self.password.as_deref(),
+            password_ref,
+            self.connect_timeout_secs,
+            self.hello_timeout_secs,
+            self.idle_timeout_secs,
         )
         .await
     }
@@ -663,6 +830,9 @@ impl Connection {
         conformance: &str,
         username: Option<&str>,
         password: Option<&str>,
+        connect_timeout_secs: u64,
+        hello_timeout_secs: u64,
+        idle_timeout_secs: u64,
     ) -> Result<Self> {
         let mut last_err: Option<Error> = None;
 
@@ -677,6 +847,9 @@ impl Connection {
                 conformance,
                 username,
                 password,
+                connect_timeout_secs,
+                hello_timeout_secs,
+                idle_timeout_secs,
             )
             .await
             {
@@ -684,7 +857,7 @@ impl Connection {
                 Err(e) => {
                     last_err = Some(e);
                     if attempt < 3 {
-                        eprintln!("[QUINN] Connection attempt {} failed, retrying...", attempt);
+                        debug!("Connection attempt {} failed, retrying...", attempt);
                         tokio::time::sleep(Duration::from_millis(150)).await;
                     }
                 }
@@ -705,22 +878,63 @@ impl Connection {
         conformance: &str,
         username: Option<&str>,
         password: Option<&str>,
+        connect_timeout_secs: u64,
+        hello_timeout_secs: u64,
+        idle_timeout_secs: u64,
     ) -> Result<Self> {
-        eprintln!("[QUINN] Creating connection to {}:{}", host, port);
+        debug!("Creating connection to {}:{}", host, port);
 
         // Install default crypto provider for rustls
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         // Build Quinn client config with TLS 1.3 explicitly (QUIC requires TLS 1.3)
         let mut client_crypto = if skip_verify {
-            eprintln!("[QUINN] Skipping certificate verification (insecure)");
+            // SECURITY WARNING: Disabling TLS verification exposes connections to MITM attacks.
+            // Credentials sent in HELLO may be intercepted. Only use for development/testing.
+            warn!(
+                "TLS certificate verification DISABLED - connection to {}:{} is vulnerable to MITM attacks. \
+                 Do NOT use skip_verify in production!",
+                host, port
+            );
             rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
                 .with_no_client_auth()
         } else {
+            // Load system root certificates for proper TLS verification
+            let mut root_store = rustls::RootCertStore::empty();
+
+            let cert_result = rustls_native_certs::load_native_certs();
+
+            // Log any errors that occurred during certificate loading
+            for err in &cert_result.errors {
+                warn!("Error loading native certificate: {:?}", err);
+            }
+
+            let mut certs_loaded = 0;
+            let mut certs_failed = 0;
+
+            for cert in cert_result.certs {
+                match root_store.add(cert) {
+                    Ok(()) => certs_loaded += 1,
+                    Err(_) => certs_failed += 1,
+                }
+            }
+
+            if certs_loaded == 0 {
+                return Err(Error::tls(
+                    "No system root certificates found. TLS verification cannot proceed. \
+                     Either install system CA certificates or use skip_verify(true) for development only.",
+                ));
+            }
+
+            debug!(
+                "Loaded {} system root certificates ({} failed to parse)",
+                certs_loaded, certs_failed
+            );
+
             rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                .with_root_certificates(rustls::RootCertStore::empty())
+                .with_root_certificates(root_store)
                 .with_no_client_auth()
         };
 
@@ -734,13 +948,23 @@ impl Connection {
 
         // Configure QUIC transport parameters to match Python/Go clients
         let mut transport = quinn::TransportConfig::default();
-        transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
+        // Cap idle timeout to quinn's maximum (2^62 - 1 microseconds ≈ 146 years)
+        // to prevent panic from VarInt overflow
+        let idle_timeout = Duration::from_secs(idle_timeout_secs.min(146_000 * 365 * 24 * 3600));
+        transport.max_idle_timeout(Some(idle_timeout.try_into().map_err(|_| {
+            Error::connection("Idle timeout value too large for QUIC protocol")
+        })?));
         transport.keep_alive_interval(Some(Duration::from_secs(5)));
         client_config.transport_config(Arc::new(transport));
 
-        // Create endpoint
-        let mut endpoint = Endpoint::client("0.0.0.0:0".parse().unwrap())
-            .map_err(|e| Error::connection(format!("Failed to create endpoint: {}", e)))?;
+        // Create endpoint - "0.0.0.0:0" is a valid socket address literal that binds
+        // to any available port on all interfaces, so this parse cannot fail
+        let mut endpoint = Endpoint::client(
+            "0.0.0.0:0"
+                .parse()
+                .expect("0.0.0.0:0 is a valid socket address"),
+        )
+        .map_err(|e| Error::connection(format!("Failed to create endpoint: {}", e)))?;
         endpoint.set_default_client_config(client_config);
 
         // Resolve server address (supports hostnames as well as IP literals)
@@ -757,7 +981,7 @@ impl Connection {
             .find(|addr| matches!(addr, SocketAddr::V4(_) | SocketAddr::V6(_)))
             .ok_or_else(|| Error::connection("Invalid address: could not resolve host"))?;
 
-        eprintln!("[QUINN] Connecting to {}", server_addr);
+        debug!("Connecting to {}", server_addr);
 
         // When skipping verification, don't use actual hostname for SNI
         // This matches Python client behavior which avoids server_name when skip_verify=True
@@ -767,10 +991,10 @@ impl Connection {
             host
         };
 
-        eprintln!("[QUINN] Using server name: {}", server_name);
+        trace!("Using server name for SNI: {}", server_name);
 
         let conn = timeout(
-            Duration::from_secs(10),
+            Duration::from_secs(connect_timeout_secs),
             endpoint
                 .connect(server_addr, server_name)
                 .map_err(|e| Error::connection(format!("Connection failed: {}", e)))?,
@@ -779,7 +1003,7 @@ impl Connection {
         .map_err(|_| Error::connection("Connection timeout"))?
         .map_err(|e| Error::connection(format!("Failed to establish connection: {}", e)))?;
 
-        eprintln!("[QUINN] ✓ Connection established!");
+        debug!("Connection established to {}:{}", host, port);
 
         // Open a single bidirectional stream used for the entire session.
         let (mut send, recv) = conn
@@ -814,10 +1038,13 @@ impl Connection {
         // Wait for HELLO response (line-delimited JSON)
         let mut reader = BufReader::new(recv);
         let mut response_line = String::new();
-        let read_len = timeout(Duration::from_secs(5), reader.read_line(&mut response_line))
-            .await
-            .map_err(|_| Error::connection("HELLO response timeout"))?
-            .map_err(|e| Error::connection(format!("Failed to read HELLO response: {}", e)))?;
+        let read_len = timeout(
+            Duration::from_secs(hello_timeout_secs),
+            reader.read_line(&mut response_line),
+        )
+        .await
+        .map_err(|_| Error::connection("HELLO response timeout"))?
+        .map_err(|e| Error::connection(format!("Failed to read HELLO response: {}", e)))?;
 
         if read_len == 0 {
             return Err(Error::connection("Connection closed before HELLO response"));
@@ -827,10 +1054,10 @@ impl Connection {
             .map_err(|e| Error::connection(format!("Invalid HELLO response: {}", e)))?;
 
         if hello_response.get("type").and_then(|t| t.as_str()) != Some("HELLO") {
-            eprintln!("[QUINN] Unexpected HELLO response: {}", hello_response);
+            warn!("Unexpected HELLO response type: {}", hello_response);
         }
 
-        eprintln!("[QUINN] ✓ HELLO handshake complete");
+        debug!("HELLO handshake complete");
 
         Ok(Self {
             conn,
@@ -1085,9 +1312,7 @@ impl Connection {
         )
         .map_err(|e| Error::protocol(format!("Failed to parse columns: {}", e)))?;
 
-        if std::env::var("GEODE_RUST_DEBUG").is_ok() {
-            eprintln!("[QUINN] Columns: {:?}", columns);
-        }
+        trace!("Schema columns: {:?}", columns);
 
         // Check for an inline BINDINGS frame already buffered (schema + bindings in one response).
         if let Some(inline_frame) = self.try_read_json_line().await? {
@@ -1713,10 +1938,30 @@ impl Connection {
     /// # }
     /// ```
     pub fn close(&mut self) -> Result<()> {
+        // QUIC close is asynchronous and best-effort - the CONNECTION_CLOSE frame
+        // will be sent by Quinn's internal I/O handling. No blocking delay needed.
+        // (Gap #17: Removed std::thread::sleep that blocked the async runtime)
         self.conn.close(0u32.into(), b"client closing");
-        // Small delay for close to be sent
-        std::thread::sleep(std::time::Duration::from_millis(100));
         Ok(())
+    }
+
+    /// Check if the connection is still healthy.
+    ///
+    /// Returns `true` if the underlying QUIC connection is still open and usable.
+    /// This is used by connection pools to verify connections before reuse.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut conn = client.connect().await?;
+    /// if conn.is_healthy() {
+    ///     // Connection is still usable
+    ///     let (page, _) = conn.query("RETURN 1").await?;
+    /// }
+    /// ```
+    pub fn is_healthy(&self) -> bool {
+        // Quinn's close_reason() returns Some if the connection was closed
+        self.conn.close_reason().is_none()
     }
 }
 
@@ -2030,5 +2275,140 @@ mod tests {
         assert_eq!(op.op_type, "Sort");
         assert_eq!(op.description, "Sort by name ASC");
         assert_eq!(op.estimated_rows, Some(100));
+    }
+
+    // redact_dsn tests - Gap #7 (DSN Password Exposure)
+
+    #[test]
+    fn test_redact_dsn_url_with_password() {
+        let dsn = "geode://admin:secret123@localhost:3141";
+        let redacted = redact_dsn(dsn);
+        assert!(redacted.contains("[REDACTED]"));
+        assert!(!redacted.contains("secret123"));
+        assert!(redacted.contains("admin"));
+        assert!(redacted.contains("localhost"));
+    }
+
+    #[test]
+    fn test_redact_dsn_url_without_password() {
+        let dsn = "geode://admin@localhost:3141";
+        let redacted = redact_dsn(dsn);
+        assert!(!redacted.contains("[REDACTED]"));
+        assert!(redacted.contains("admin"));
+        assert!(redacted.contains("localhost"));
+    }
+
+    #[test]
+    fn test_redact_dsn_url_no_auth() {
+        let dsn = "geode://localhost:3141";
+        let redacted = redact_dsn(dsn);
+        assert_eq!(redacted, dsn);
+    }
+
+    #[test]
+    fn test_redact_dsn_query_param_password() {
+        let dsn = "localhost:3141?username=admin&password=secret123";
+        let redacted = redact_dsn(dsn);
+        assert!(redacted.contains("[REDACTED]"));
+        assert!(!redacted.contains("secret123"));
+        assert!(redacted.contains("username=admin"));
+    }
+
+    #[test]
+    fn test_redact_dsn_query_param_pass() {
+        let dsn = "localhost:3141?user=admin&pass=mysecret";
+        let redacted = redact_dsn(dsn);
+        assert!(redacted.contains("[REDACTED]"));
+        assert!(!redacted.contains("mysecret"));
+    }
+
+    #[test]
+    fn test_redact_dsn_simple_no_password() {
+        let dsn = "localhost:3141?insecure=true";
+        let redacted = redact_dsn(dsn);
+        assert_eq!(redacted, dsn);
+    }
+
+    #[test]
+    fn test_redact_dsn_url_with_query_and_password() {
+        let dsn = "geode://user:pass@localhost:3141?insecure=true";
+        let redacted = redact_dsn(dsn);
+        assert!(redacted.contains("[REDACTED]"));
+        assert!(!redacted.contains(":pass@"));
+        assert!(redacted.contains("insecure=true"));
+    }
+
+    // validate() tests - Gap #9 (Validation Not Automatic)
+
+    #[test]
+    fn test_client_validate_valid() {
+        let client = Client::new("localhost", 3141);
+        assert!(client.validate().is_ok());
+    }
+
+    #[test]
+    fn test_client_validate_valid_hostname() {
+        let client = Client::new("geode.example.com", 3141);
+        assert!(client.validate().is_ok());
+    }
+
+    #[test]
+    fn test_client_validate_valid_ipv4() {
+        let client = Client::new("192.168.1.1", 8443);
+        assert!(client.validate().is_ok());
+    }
+
+    #[test]
+    fn test_client_validate_invalid_hostname_hyphen_start() {
+        let client = Client::new("-invalid", 3141);
+        assert!(client.validate().is_err());
+    }
+
+    #[test]
+    fn test_client_validate_invalid_hostname_hyphen_end() {
+        let client = Client::new("invalid-", 3141);
+        assert!(client.validate().is_err());
+    }
+
+    #[test]
+    fn test_client_validate_invalid_port_zero() {
+        let client = Client::new("localhost", 0);
+        assert!(client.validate().is_err());
+    }
+
+    #[test]
+    fn test_client_validate_invalid_page_size_zero() {
+        let client = Client::new("localhost", 3141).page_size(0);
+        assert!(client.validate().is_err());
+    }
+
+    #[test]
+    fn test_client_validate_invalid_page_size_too_large() {
+        let client = Client::new("localhost", 3141).page_size(200_000);
+        assert!(client.validate().is_err());
+    }
+
+    #[test]
+    fn test_client_validate_with_all_options() {
+        let client = Client::new("geode.example.com", 8443)
+            .skip_verify(true)
+            .page_size(500)
+            .username("admin")
+            .password("secret")
+            .connect_timeout(15)
+            .hello_timeout(10)
+            .idle_timeout(60);
+        assert!(client.validate().is_ok());
+    }
+
+    // Gap #13: Test that extreme timeout values don't cause builder panics
+    #[test]
+    fn test_client_extreme_timeout_values() {
+        // These should not panic - the actual validation/capping happens at connect time
+        let _client = Client::new("localhost", 3141)
+            .connect_timeout(u64::MAX)
+            .hello_timeout(u64::MAX)
+            .idle_timeout(u64::MAX);
+        // Builder should accept any u64 value without panicking
     }
 }
