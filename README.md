@@ -54,7 +54,7 @@ use geode_client::{Client, Result};
 #[tokio::main]
 async fn main() -> Result<()> {
     // QUIC transport (default, high-performance)
-    let client = Client::from_dsn("quic://127.0.0.1:3141?insecure=true")?;
+    let client = Client::from_dsn("quic://127.0.0.1:3141?insecure_tls_skip_verify=true")?;
 
     // Or gRPC transport (HTTP/2 based)
     // let client = Client::from_dsn("grpc://127.0.0.1:50051?tls=0")?;
@@ -259,13 +259,13 @@ You can also create a client from a DSN (Data Source Name) string:
 use geode_client::Client;
 
 // QUIC transport (recommended for performance)
-let client = Client::from_dsn("quic://localhost:3141?insecure=true").unwrap();
+let client = Client::from_dsn("quic://localhost:3141?insecure_tls_skip_verify=true").unwrap();
 
 // gRPC transport (HTTP/2 based, broader compatibility)
 let client = Client::from_dsn("grpc://localhost:50051?tls=false").unwrap();
 
 // With authentication
-let client = Client::from_dsn("quic://admin:secret@localhost:3141?insecure=true").unwrap();
+let client = Client::from_dsn("quic://admin:secret@localhost:3141?insecure_tls_skip_verify=true").unwrap();
 
 // IPv6 addresses use bracket notation
 let client = Client::from_dsn("quic://[::1]:3141").unwrap();
@@ -285,7 +285,7 @@ let client = Client::from_dsn("quic://[::1]:3141").unwrap();
 - `hello_name` - Client name (default: "geode-rust-quinn")
 - `hello_ver` - Client version (default: "0.1.0")
 - `conformance` - GQL conformance level (default: "min")
-- `insecure` - Skip TLS verification for QUIC (true/false, default: false)
+- `insecure_tls_skip_verify` - Skip TLS verification for QUIC (true/false, default: false)
 - `tls` - Enable/disable TLS for gRPC (true/false/1/0, default: true)
 - `username` or `user` - Authentication username
 - `password` or `pass` - Authentication password

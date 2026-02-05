@@ -72,6 +72,7 @@ This security review identified **18 findings** across the Geode Rust client lib
 **Problem:** Creating a `ConnectionPool` with `max_size=0` causes `acquire()` to block forever. The semaphore is initialized with zero permits, so any call to `acquire_owned()` will wait indefinitely.
 
 **Fix Applied:**
+
 ```rust
 // src/pool.rs - Added assertion in constructor (lines 17-31)
 impl ConnectionPool {
@@ -93,6 +94,7 @@ impl ConnectionPool {
 ```
 
 **Test Added:**
+
 ```rust
 #[test]
 #[should_panic(expected = "ConnectionPool max_size must be at least 1")]
@@ -117,6 +119,7 @@ fn test_connection_pool_max_size_zero_panics() {
 **Problem:** The `.gitleaks.toml` had a blanket exclusion for ALL `.rs` files, completely bypassing secret detection for Rust source.
 
 **Fix Applied:**
+
 ```toml
 # .gitleaks.toml - Removed blanket .rs exclusion
 [allowlist]
@@ -136,7 +139,7 @@ allowlist = { paths = ['''tests/.*'''] }
 [[rules]]
 id = "documentation-examples"
 description = "Documentation examples showing DSN format"
-regex = '''geode://[^:]+:secret@'''
+regex = '''quic://[^:]+:secret@'''
 allowlist = { paths = ['''.*\.md$''', '''examples/.*'''] }
 ```
 
@@ -150,10 +153,12 @@ allowlist = { paths = ['''.*\.md$''', '''examples/.*'''] }
 - **Risk Score:** 16 (Impact: 2, Likelihood: 2)
 
 **Problem:** Two `unwrap()` calls in client.rs could panic:
+
 1. `Duration.try_into().unwrap()` - panics if timeout exceeds quinn's VarInt range
 2. `"0.0.0.0:0".parse().unwrap()` - could theoretically panic
 
 **Fix Applied:**
+
 ```rust
 // src/client.rs - Timeout now capped to prevent overflow
 // Cap idle timeout to quinn's maximum (2^62 - 1 microseconds ≈ 146 years)
@@ -174,6 +179,7 @@ let mut endpoint = Endpoint::client(
 ```
 
 **Test Added:**
+
 ```rust
 #[test]
 fn test_client_extreme_timeout_values() {
@@ -197,6 +203,7 @@ fn test_client_extreme_timeout_values() {
 **Problem:** The sbom-scan job had `allow_failure: true`, allowing vulnerable dependencies to be merged.
 
 **Fix Applied:**
+
 ```yaml
 # .gitlab-ci.yml - Removed allow_failure from sbom-scan
 # SBOM generation and scanning
@@ -231,6 +238,7 @@ fn test_client_extreme_timeout_values() {
 **Problem:** Stale/broken connections could be returned from the pool without validation.
 
 **Fix Applied:**
+
 ```rust
 // src/client.rs - Added is_healthy() method
 impl Connection {
@@ -276,6 +284,7 @@ impl Drop for PooledConnection {
 **Problem:** The `Connection::close()` method used `std::thread::sleep()` which blocked the tokio runtime's worker thread for 100ms. In high-concurrency scenarios with frequent connection churn, this could starve other async tasks.
 
 **Fix Applied:**
+
 ```rust
 // src/client.rs - Removed blocking sleep (Option 2: backward compatible)
 pub fn close(&mut self) -> Result<()> {
@@ -302,6 +311,7 @@ pub fn close(&mut self) -> Result<()> {
 - **Resolution:** Added `rustls-native-certs` v0.8 dependency to load system root certificates
 
 **Fix Applied:**
+
 ```rust
 // Load system root certificates for proper TLS verification
 let cert_result = rustls_native_certs::load_native_certs();
@@ -317,6 +327,7 @@ for cert in cert_result.certs {
 - **Resolution:** Added prominent warning log when skip_verify is enabled
 
 **Fix Applied:**
+
 ```rust
 warn!(
     "TLS certificate verification DISABLED - connection to {}:{} is vulnerable to MITM attacks. \
@@ -332,6 +343,7 @@ warn!(
 - **Resolution:** All CI components pinned to v1.9.15
 
 **Fix Applied:** Updated `.gitlab-ci.yml` to pin all components:
+
 ```yaml
 - component: gitlab.com/devnw/ci-catalog/rust-lint@v1.9.15
 - component: gitlab.com/devnw/ci-catalog/rust-build@v1.9.15
@@ -351,6 +363,7 @@ warn!(
 - **Resolution:** Added `secrecy` v0.10 crate, password now stored as `SecretString`
 
 **Fix Applied:**
+
 ```rust
 use secrecy::{ExposeSecret, SecretString};
 
@@ -367,6 +380,7 @@ pub struct Client {
 - **Resolution:** Replaced bare `.unwrap()` calls with proper error handling
 
 **Fix Applied:**
+
 ```rust
 // Before: .acquire_owned().await.unwrap()
 // After:
@@ -382,6 +396,7 @@ pub struct Client {
 - **Resolution:** Added `redact_dsn()` function to sanitize DSN strings before including in error messages
 
 **Tests Added:**
+
 - `test_redact_dsn_url_with_password` - Verifies URL password redaction
 - `test_redact_dsn_url_without_password` - Verifies no false positives
 - `test_redact_dsn_url_no_auth` - Verifies passthrough when no auth
@@ -397,6 +412,7 @@ pub struct Client {
 - **Resolution:** Added non-root user to Dockerfile
 
 **Fix Applied:**
+
 ```dockerfile
 RUN groupadd --gid 1000 geode && \
     useradd --uid 1000 --gid 1000 --shell /bin/false --create-home geode
@@ -410,6 +426,7 @@ USER geode
 - **Resolution:** Added `validate()` method to Client builder and automatic validation in `connect()`
 
 **Tests Added:**
+
 - `test_client_validate_valid` - Verifies valid config passes
 - `test_client_validate_valid_hostname` - Verifies FQDN passes
 - `test_client_validate_valid_ipv4` - Verifies IPv4 passes
@@ -427,6 +444,7 @@ USER geode
 - **Resolution:** Added configurable timeout builder methods
 
 **Fix Applied:**
+
 ```rust
 let client = Client::new("localhost", 3141)
     .connect_timeout(15)     // default: 10s
@@ -441,6 +459,7 @@ let client = Client::new("localhost", 3141)
 - **Resolution:** Added cargo-audit job to CI pipeline
 
 **Fix Applied:**
+
 ```yaml
 security:cargo-audit:
   stage: security
@@ -478,7 +497,7 @@ The codebase demonstrates several good security practices:
 
 All tests pass after implementing security fixes:
 
-```
+```text
 cargo test --lib
 test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
@@ -491,6 +510,7 @@ test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ## Methodology
 
 ### Tools Used
+
 - Manual adversarial code review
 - GitLab CLI (glab) for issue tracking
 - Pattern searching (ripgrep)
@@ -498,6 +518,7 @@ test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 - cargo test for validation
 
 ### Review Scope
+
 - Application code (`src/*.rs`)
 - CI/CD configuration (`.gitlab-ci.yml`)
 - Container configuration (`Dockerfile`)
@@ -506,6 +527,7 @@ test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 - Examples and tests
 
 ### Files Modified During Remediation
+
 - `.gitleaks.toml` - Removed blanket .rs exclusion (#12)
 - `src/client.rs` - Fixed timeout overflow, added is_healthy(), removed blocking sleep (#13, #16, #17)
 - `.gitlab-ci.yml` - Removed allow_failure from sbom-scan (#14)
