@@ -1,0 +1,31 @@
+# cargo-audit configuration
+# See: https://rustsec.org/
+#
+# This file documents known security advisories that have been reviewed and
+# determined to be acceptable risks for this project.
+
+[advisories]
+# Advisories to ignore (with documented justification)
+ignore = [
+    # RUSTSEC-2025-0111: tokio-tar PAX header parsing vulnerability
+    # Status: ACCEPTED RISK (Dev-only dependency)
+    # Justification: This advisory affects tokio-tar which is only used as a
+    # transitive dependency of testcontainers (dev-dependency). It is never
+    # included in production builds. The vulnerability relates to PAX header
+    # parsing which could allow file smuggling, but since we only use this
+    # for pulling Docker images in integration tests, the attack surface is
+    # limited to our controlled test environment.
+    # No upstream fix is available as of 2026-02-05.
+    # Review date: 2026-02-05
+    "RUSTSEC-2025-0111",
+
+    # RUSTSEC-2025-0134: rustls-pemfile unmaintained
+    # Status: ACCEPTED RISK (Warning only, no known exploits)
+    # Justification: This is an unmaintained package warning, not a security
+    # vulnerability. The package is widely used and has no known security
+    # issues. It's a transitive dependency of tonic and bollard. We will
+    # monitor for a maintained replacement or fork. The TLS stack itself
+    # (rustls) remains actively maintained and secure.
+    # Review date: 2026-02-05
+    "RUSTSEC-2025-0134",
+]

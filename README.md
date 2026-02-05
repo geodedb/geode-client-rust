@@ -251,6 +251,8 @@ let client = Client::new("127.0.0.1", 3141)  // host and port
 
 ### DSN Connection String
 
+> **Note**: See [`geode/docs/DSN.md`](../geode/docs/DSN.md) for the complete DSN specification.
+
 You can also create a client from a DSN (Data Source Name) string:
 
 ```rust
