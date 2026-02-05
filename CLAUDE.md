@@ -10,7 +10,7 @@ cargo build              # Debug build
 cargo build --release    # Release build
 
 # Test
-cargo test               # Run all unit tests (252 tests)
+cargo test               # Run all unit tests (323 tests)
 cargo test --lib         # Run library tests only
 cargo test -- --nocapture  # Show println! output
 
@@ -52,7 +52,10 @@ cargo run --example test_quinn
 ```text
 src/
 ├── lib.rs           # Library entry point, re-exports
-├── client.rs        # QUIC client, Connection, query execution
+├── client.rs        # Connection, query execution, dual transport support
+├── dsn.rs           # DSN parsing (quic://, grpc://)
+├── grpc.rs          # gRPC transport using tonic
+├── proto.rs         # Protobuf encoding/decoding helpers
 ├── types.rs         # Value types, ValueKind, type conversions
 ├── query_builder.rs # QueryBuilder, PatternBuilder, PredicateBuilder
 ├── pool.rs          # ConnectionPool for concurrent access
@@ -65,25 +68,42 @@ src/
 
 ### Client Module (`client.rs`)
 
-The client module handles QUIC connections using Quinn:
+The client module supports dual transports: QUIC (using Quinn) and gRPC (using Tonic):
 
-- **Client**: Builder for configuring connections (host, port, TLS settings)
-- **Connection**: Active QUIC connection with query methods
+- **Client**: Builder for configuring connections (host, port, TLS, transport)
+- **Connection**: Active connection with query methods (wraps either QUIC or gRPC)
+- **ConnectionKind**: Internal enum dispatching to QUIC or gRPC transport
 - **Page/Column**: Query result structures
 
 **Connection Flow:**
 
 ```text
-Client::new() -> configure -> connect() -> Connection
+Client::new() or Client::from_dsn() -> configure -> connect() -> Connection
 Connection: query() / query_with_params() / begin() / commit() / rollback()
 ```
 
 **Protocol:**
 
-- ALPN: `b"geode/1"`
-- Wire format: JSON line protocol (one JSON object per line)
+- ALPN: `b"geode/1"` (QUIC only)
+- Wire format: Protobuf with 4-byte big-endian length prefix (QUIC) or native gRPC framing
 - Handshake: HELLO message exchange
 - Retry: 3 attempts with 150ms backoff
+
+### DSN Module (`dsn.rs`)
+
+Parses Data Source Name connection strings:
+
+- **Schemes**: `quic://`, `grpc://`, `grpcs://`
+- **Transport**: Determines QUIC vs gRPC based on scheme
+- **IPv6**: Supports bracket notation for IPv6 addresses
+- **Options**: Query parameters for page_size, TLS, auth, etc.
+
+### gRPC Module (`grpc.rs`)
+
+gRPC transport implementation using Tonic:
+
+- **GrpcClient**: Tonic-based client with TLS support
+- Stub implementation pending full proto code generation
 
 ### Type System (`types.rs`)
 
@@ -173,6 +193,8 @@ Tests are inline in each module using `#[cfg(test)]`:
 | pool.rs | 12 | Configuration, semaphore permits |
 | auth.rs | 24 | Serialization, deserialization |
 | validate.rs | 25 | Query, param names, hostname, port, page_size |
+| dsn.rs | 44 | URL parsing, schemes, IPv6, options |
+| grpc.rs | 15 | Proto value conversion, message types |
 
 ### Running Specific Tests
 
@@ -221,12 +243,16 @@ cargo test test_error_is_retryable
 ### Core
 
 - `tokio` (1.35) - Async runtime
-- `quinn` (0.11) - Pure Rust QUIC
+- `quinn` (0.11) - Pure Rust QUIC transport
+- `tonic` (0.12) - gRPC transport with TLS support
+- `prost` (0.13) - Protobuf encoding/decoding
 - `rustls` (0.23) - TLS 1.3 with AWS-LC-RS crypto
+- `url` (2.5) - DSN URL parsing
 
 ### Serialization
 
 - `serde` + `serde_json` - JSON handling
+- `prost` - Protobuf wire format
 
 ### Types
 

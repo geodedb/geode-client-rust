@@ -1,11 +1,13 @@
 # Geode Rust Client
 
-A high-performance async Rust client library for [Geode](https://gitlab.com/devnw/codepros/geode/geode) graph database with full GQL (ISO/IEC 39075:2024) support via QUIC+TLS.
+A high-performance async Rust client library for [Geode](https://gitlab.com/devnw/codepros/geode/geode) graph database with full GQL (ISO/IEC 39075:2024) support.
 
 ## Features
 
 - 🚀 **Fully async** using tokio with type safety
 - 🔒 **QUIC + TLS 1.3** for secure, high-performance networking
+- 🌐 **gRPC transport** option using tonic (alternative to QUIC)
+- 📦 **Protobuf wire protocol** for efficient serialization
 - 📝 **Full GQL support** (98.6% ISO compliance)
 - 🏗️ **Query builders** for programmatic query construction
 - 🔐 **Complete authentication** with RBAC and RLS support
@@ -31,31 +33,35 @@ tokio = { version = "1", features = ["full"] }
 
 ## Requirements
 
-- Rust 1.70+
-- quinn >= 0.10 (QUIC support)
+- Rust 1.85+
 - tokio runtime
-- Running Geode server with QUIC enabled
+- Running Geode server
+
+### Transport Options
+
+| Transport | Library | Default Port | Use Case |
+|-----------|---------|--------------|----------|
+| QUIC | quinn 0.11 | 3141 | High-performance, low-latency |
+| gRPC | tonic 0.12 | 50051 | Broad compatibility, HTTP/2 |
 
 ## Quick Start
 
-### Basic QUIC Connection
+### Using DSN (Recommended)
 
 ```rust
 use geode_client::{Client, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Create QUIC client (skip TLS verification for development)
-    let client = Client::new("127.0.0.1", 3141)
-        .skip_verify(true)
-        .page_size(1000);
+    // QUIC transport (default, high-performance)
+    let client = Client::from_dsn("quic://127.0.0.1:3141?insecure=true")?;
 
-    // Connect via QUIC
-    let conn = client.connect().await?;
-    println!("Connected to Geode via QUIC!");
+    // Or gRPC transport (HTTP/2 based)
+    // let client = Client::from_dsn("grpc://127.0.0.1:50051?tls=0")?;
 
-    // Execute query
-    let page = conn.query("RETURN 1 AS x, 'Hello QUIC' AS greeting", None).await?;
+    let mut conn = client.connect().await?;
+
+    let (page, _) = conn.query("RETURN 1 AS x, 'Hello Geode' AS greeting").await?;
 
     for row in &page.rows {
         let x = row.get("x").unwrap().as_int()?;
@@ -63,9 +69,34 @@ async fn main() -> Result<()> {
         println!("x={}, greeting={}", x, greeting);
     }
 
-    // Close connection
-    conn.close().await?;
+    conn.close()?;
+    Ok(())
+}
+```
 
+### Basic QUIC Connection (Builder API)
+
+```rust
+use geode_client::{Client, Result};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Create QUIC client using builder pattern
+    let client = Client::new("127.0.0.1", 3141)
+        .skip_verify(true)
+        .page_size(1000);
+
+    let mut conn = client.connect().await?;
+    println!("Connected to Geode via QUIC!");
+
+    let (page, _) = conn.query("RETURN 1 AS x").await?;
+
+    for row in &page.rows {
+        let x = row.get("x").unwrap().as_int()?;
+        println!("x={}", x);
+    }
+
+    conn.close()?;
     Ok(())
 }
 ```
@@ -225,23 +256,35 @@ You can also create a client from a DSN (Data Source Name) string:
 ```rust
 use geode_client::Client;
 
-// Simple DSN
-let client = Client::from_dsn("localhost:3141").unwrap();
+// QUIC transport (recommended for performance)
+let client = Client::from_dsn("quic://localhost:3141?insecure=true").unwrap();
 
-// With options
-let client = Client::from_dsn("localhost:3141?insecure=true&page_size=500").unwrap();
+// gRPC transport (HTTP/2 based, broader compatibility)
+let client = Client::from_dsn("grpc://localhost:50051?tls=false").unwrap();
 
-// URL format with authentication
-let client = Client::from_dsn("geode://admin:secret@localhost:3141?insecure=true").unwrap();
+// With authentication
+let client = Client::from_dsn("quic://admin:secret@localhost:3141?insecure=true").unwrap();
+
+// IPv6 addresses use bracket notation
+let client = Client::from_dsn("quic://[::1]:3141").unwrap();
 ```
 
-Supported DSN options:
+**Supported Schemes:**
+
+| Scheme | Transport | Description |
+|--------|-----------|-------------|
+| `quic://` | QUIC | High-performance, low-latency (recommended) |
+| `grpc://` | gRPC | HTTP/2 based, broad compatibility |
+| `grpcs://` | gRPC + TLS | gRPC with explicit TLS |
+
+**Supported DSN Options:**
 
 - `page_size` - Results page size (default: 1000)
 - `hello_name` - Client name (default: "geode-rust-quinn")
 - `hello_ver` - Client version (default: "0.1.0")
 - `conformance` - GQL conformance level (default: "min")
-- `insecure` - Skip TLS verification (true/false, default: false)
+- `insecure` - Skip TLS verification for QUIC (true/false, default: false)
+- `tls` - Enable/disable TLS for gRPC (true/false/1/0, default: true)
 - `username` or `user` - Authentication username
 - `password` or `pass` - Authentication password
 
@@ -413,7 +456,7 @@ cargo build
 cargo build --release
 
 # Run tests
-cargo test                           # Unit tests (274 tests)
+cargo test                           # Unit tests (323 tests)
 cargo test --test proptest           # Property-based tests (28 tests)
 cargo test --features integration    # Integration tests (requires Geode server)
 
@@ -440,7 +483,7 @@ The library includes comprehensive testing:
 
 | Test Type | Count | Command |
 |-----------|-------|---------|
-| Unit tests | 274 | `cargo test` |
+| Unit tests | 323 | `cargo test` |
 | Property tests | 28 | `cargo test --test proptest` |
 | Integration tests | 36 | `cargo test --features integration` |
 | Benchmarks | 59 | `cargo bench` |

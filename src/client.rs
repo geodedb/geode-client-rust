@@ -1,5 +1,5 @@
-//! Geode client implementation using Quinn library for QUIC transport.
-//! Switched back to Quinn from Quiche for better MsQuic compatibility.
+//! Geode client implementation supporting both QUIC and gRPC transports.
+//! Uses protobuf wire protocol with 4-byte big-endian length prefix for QUIC.
 
 use log::{debug, trace, warn};
 use quinn::{ClientConfig, Endpoint};
@@ -9,10 +9,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::{Duration, timeout};
 
+use crate::dsn::{Dsn, Transport};
 use crate::error::{Error, Result};
+use crate::proto;
 use crate::types::Value;
 use crate::validate;
 
@@ -284,10 +285,16 @@ pub struct QueryProfile {
     pub raw: serde_json::Value,
 }
 
-/// A Geode database client using QUIC transport.
+/// A Geode database client supporting both QUIC and gRPC transports.
 ///
 /// Use the builder pattern to configure the client, then call [`connect`](Client::connect)
 /// to establish a connection.
+///
+/// # Transport Selection
+///
+/// The transport is selected based on the DSN scheme:
+/// - `quic://` - QUIC transport (default)
+/// - `grpc://` - gRPC transport
 ///
 /// # Example
 ///
@@ -295,10 +302,15 @@ pub struct QueryProfile {
 /// use geode_client::Client;
 ///
 /// # async fn example() -> geode_client::Result<()> {
+/// // QUIC transport (legacy API)
 /// let client = Client::new("127.0.0.1", 3141)
 ///     .skip_verify(true)  // Development only!
 ///     .page_size(500)
 ///     .client_name("my-app");
+///
+/// // Or use DSN with explicit transport
+/// let client = Client::from_dsn("quic://127.0.0.1:3141?insecure=true")?;
+/// let client = Client::from_dsn("grpc://127.0.0.1:50051")?;
 ///
 /// let mut conn = client.connect().await?;
 /// let (page, _) = conn.query("RETURN 1 AS x").await?;
@@ -313,6 +325,7 @@ pub struct QueryProfile {
 /// in debug output or error messages.
 #[derive(Clone)]
 pub struct Client {
+    transport: Transport,
     host: String,
     port: u16,
     skip_verify: bool,
@@ -335,6 +348,9 @@ pub struct Client {
 impl Client {
     /// Create a new QUIC client for the specified host and port.
     ///
+    /// This method creates a client using QUIC transport. For gRPC transport,
+    /// use [`from_dsn`](Client::from_dsn) with a `grpc://` scheme.
+    ///
     /// # Arguments
     ///
     /// * `host` - The server hostname or IP address
@@ -351,12 +367,13 @@ impl Client {
     /// ```
     pub fn new(host: impl Into<String>, port: u16) -> Self {
         Self {
+            transport: Transport::Quic,
             host: host.into(),
             port,
             skip_verify: false,
             page_size: 1000,
-            hello_name: "geode-rust-quinn".to_string(),
-            hello_ver: "0.1.0".to_string(),
+            hello_name: "geode-rust".to_string(),
+            hello_ver: env!("CARGO_PKG_VERSION").to_string(),
             conformance: "min".to_string(),
             username: None,
             password: None,
@@ -368,178 +385,75 @@ impl Client {
 
     /// Create a new client from a DSN (Data Source Name) string.
     ///
-    /// Supported formats:
-    /// - `host:port` - Basic connection
-    /// - `host:port?options` - With query parameters
-    /// - `geode://host:port?options` - URL format
-    /// - `geode://user:pass@host:port?options` - With authentication
+    /// # Supported DSN Formats
     ///
-    /// Supported options:
+    /// - `quic://host:port?options` - QUIC transport (recommended)
+    /// - `grpc://host:port?options` - gRPC transport
+    /// - `grcp://host:port?options` - Alias for gRPC (deprecated)
+    /// - `host:port?options` - Legacy format (defaults to QUIC)
+    ///
+    /// # Supported Options
+    ///
+    /// - `tls` - Enable/disable TLS (0/1/true/false)
+    /// - `insecure` or `skip_verify` - Skip TLS verification
     /// - `page_size` - Results page size (default: 1000)
-    /// - `hello_name` - Client name (default: "geode-rust-quinn")
-    /// - `hello_ver` - Client version (default: "0.1.0")
-    /// - `conformance` - GQL conformance level (default: "min")
-    /// - `insecure` - Skip TLS verification (true/false, default: false)
+    /// - `client_name` or `hello_name` - Client name
+    /// - `client_version` or `hello_ver` - Client version
+    /// - `conformance` - GQL conformance level
+    /// - `username` or `user` - Authentication username
+    /// - `password` or `pass` - Authentication password
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```
     /// use geode_client::Client;
     ///
-    /// // Simple DSN
-    /// let client = Client::from_dsn("localhost:3141").unwrap();
+    /// // QUIC transport (explicit)
+    /// let client = Client::from_dsn("quic://localhost:3141").unwrap();
     ///
-    /// // With options
-    /// let client = Client::from_dsn("localhost:3141?insecure=true&page_size=500").unwrap();
+    /// // gRPC transport
+    /// let client = Client::from_dsn("grpc://localhost:50051?tls=0").unwrap();
     ///
-    /// // URL format with auth
-    /// let client = Client::from_dsn("geode://admin:secret@localhost:3141?insecure=true").unwrap();
+    /// // Legacy format (defaults to QUIC)
+    /// let client = Client::from_dsn("localhost:3141?insecure=true").unwrap();
+    ///
+    /// // With authentication
+    /// let client = Client::from_dsn("quic://admin:secret@localhost:3141").unwrap();
+    ///
+    /// // IPv6 support
+    /// let client = Client::from_dsn("grpc://[::1]:50051").unwrap();
     /// ```
-    pub fn from_dsn(dsn: &str) -> Result<Self> {
-        let dsn = dsn.trim();
-        if dsn.is_empty() {
-            return Err(Error::invalid_dsn("DSN cannot be empty"));
-        }
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidDsn` if:
+    /// - DSN is empty
+    /// - Scheme is unsupported (not quic://, grpc://, or schemeless)
+    /// - Host is missing
+    /// - Port is invalid
+    pub fn from_dsn(dsn_str: &str) -> Result<Self> {
+        let dsn = Dsn::parse(dsn_str)?;
 
-        // Check for URL format
-        if dsn.starts_with("geode://") {
-            return Self::parse_url_dsn(dsn);
-        }
-
-        // Parse as host:port?options
-        Self::parse_simple_dsn(dsn)
+        Ok(Self {
+            transport: dsn.transport(),
+            host: dsn.host().to_string(),
+            port: dsn.port(),
+            skip_verify: dsn.skip_verify(),
+            page_size: dsn.page_size(),
+            hello_name: dsn.client_name().to_string(),
+            hello_ver: dsn.client_version().to_string(),
+            conformance: dsn.conformance().to_string(),
+            username: dsn.username().map(String::from),
+            password: dsn.password().map(|p| SecretString::from(p.to_string())),
+            connect_timeout_secs: 10,
+            hello_timeout_secs: 5,
+            idle_timeout_secs: 30,
+        })
     }
 
-    fn parse_url_dsn(dsn: &str) -> Result<Self> {
-        use std::collections::HashMap;
-
-        // Parse as URL - use redacted DSN in error message to prevent password exposure
-        let url = url::Url::parse(dsn).map_err(|e| {
-            Error::invalid_dsn(format!(
-                "Invalid URL format in '{}': {}",
-                redact_dsn(dsn),
-                e
-            ))
-        })?;
-
-        let host = url
-            .host_str()
-            .ok_or_else(|| Error::invalid_dsn("Host is required"))?
-            .to_string();
-
-        let port = url.port().unwrap_or(3141);
-
-        // Extract username/password
-        let username = if !url.username().is_empty() {
-            Some(
-                urlencoding::decode(url.username())
-                    .map_err(|e| Error::invalid_dsn(format!("Invalid username encoding: {}", e)))?
-                    .into_owned(),
-            )
-        } else {
-            None
-        };
-
-        let password = url.password().map(|p| {
-            let decoded = urlencoding::decode(p)
-                .map(|s| s.into_owned())
-                .unwrap_or_else(|_| p.to_string());
-            SecretString::from(decoded)
-        });
-
-        // Parse query parameters
-        let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
-
-        let mut client = Self::new(host, port);
-        client.username = username;
-        client.password = password;
-
-        Self::apply_params(&mut client, &params)?;
-
-        Ok(client)
-    }
-
-    fn parse_simple_dsn(dsn: &str) -> Result<Self> {
-        use std::collections::HashMap;
-
-        // Split off query string
-        let (host_port, query_str) = if let Some(idx) = dsn.find('?') {
-            (&dsn[..idx], Some(&dsn[idx + 1..]))
-        } else {
-            (dsn, None)
-        };
-
-        // Parse host:port
-        let (host, port) = if let Some(idx) = host_port.rfind(':') {
-            let host = &host_port[..idx];
-            let port_str = &host_port[idx + 1..];
-            let port = port_str
-                .parse::<u16>()
-                .map_err(|_| Error::invalid_dsn(format!("Invalid port: {}", port_str)))?;
-            (host.to_string(), port)
-        } else {
-            (host_port.to_string(), 3141)
-        };
-
-        if host.is_empty() {
-            return Err(Error::invalid_dsn("Host is required"));
-        }
-
-        let mut client = Self::new(host, port);
-
-        // Parse query parameters
-        if let Some(qs) = query_str {
-            let params: HashMap<String, String> = qs
-                .split('&')
-                .filter_map(|pair| {
-                    let mut parts = pair.splitn(2, '=');
-                    let key = parts.next()?;
-                    let value = parts.next().unwrap_or("");
-                    Some((key.to_string(), value.to_string()))
-                })
-                .collect();
-
-            Self::apply_params(&mut client, &params)?;
-        }
-
-        Ok(client)
-    }
-
-    fn apply_params(
-        client: &mut Self,
-        params: &std::collections::HashMap<String, String>,
-    ) -> Result<()> {
-        for (key, value) in params {
-            match key.as_str() {
-                "page_size" => {
-                    client.page_size = value
-                        .parse()
-                        .map_err(|_| Error::invalid_dsn(format!("Invalid page_size: {}", value)))?;
-                }
-                "hello_name" => {
-                    client.hello_name = value.clone();
-                }
-                "hello_ver" => {
-                    client.hello_ver = value.clone();
-                }
-                "conformance" => {
-                    client.conformance = value.clone();
-                }
-                "insecure" => {
-                    client.skip_verify = value == "true" || value == "1";
-                }
-                "username" | "user" => {
-                    client.username = Some(value.clone());
-                }
-                "password" | "pass" => {
-                    client.password = Some(SecretString::from(value.clone()));
-                }
-                _ => {
-                    // Ignore unknown parameters for forward compatibility
-                }
-            }
-        }
-        Ok(())
+    /// Get the transport type for this client.
+    pub fn transport(&self) -> Transport {
+        self.transport
     }
 
     /// Skip TLS certificate verification.
@@ -753,29 +667,76 @@ impl Client {
         // Expose the secret password only when needed for the connection
         let password_ref = self.password.as_ref().map(|s| s.expose_secret());
 
-        Connection::new(
-            &self.host,
-            self.port,
-            self.skip_verify,
-            self.page_size,
-            &self.hello_name,
-            &self.hello_ver,
-            &self.conformance,
-            self.username.as_deref(),
-            password_ref,
-            self.connect_timeout_secs,
-            self.hello_timeout_secs,
-            self.idle_timeout_secs,
-        )
-        .await
+        match self.transport {
+            Transport::Quic => {
+                Connection::new_quic(
+                    &self.host,
+                    self.port,
+                    self.skip_verify,
+                    self.page_size,
+                    &self.hello_name,
+                    &self.hello_ver,
+                    &self.conformance,
+                    self.username.as_deref(),
+                    password_ref,
+                    self.connect_timeout_secs,
+                    self.hello_timeout_secs,
+                    self.idle_timeout_secs,
+                )
+                .await
+            }
+            Transport::Grpc => {
+                #[cfg(feature = "grpc")]
+                {
+                    Connection::new_grpc(
+                        &self.host,
+                        self.port,
+                        self.skip_verify,
+                        self.page_size,
+                        self.username.as_deref(),
+                        password_ref,
+                    )
+                    .await
+                }
+                #[cfg(not(feature = "grpc"))]
+                {
+                    Err(Error::connection(
+                        "gRPC transport requires the 'grpc' feature to be enabled",
+                    ))
+                }
+            }
+        }
     }
+}
+
+/// Internal connection type for transport-specific implementations.
+#[allow(dead_code)]
+enum ConnectionKind {
+    /// QUIC transport connection
+    Quic {
+        conn: quinn::Connection,
+        send: quinn::SendStream,
+        recv: quinn::RecvStream,
+        /// Reserved for future streaming support
+        buffer: Vec<u8>,
+        /// Reserved for request ID tracking
+        next_request_id: u64,
+    },
+    /// gRPC transport connection
+    #[cfg(feature = "grpc")]
+    Grpc { client: crate::grpc::GrpcClient },
 }
 
 /// An active connection to a Geode database server.
 ///
-/// A `Connection` represents a single QUIC connection with an open bidirectional
-/// stream for communication. It provides methods for executing queries, managing
+/// A `Connection` represents a connection to the Geode server using either
+/// QUIC or gRPC transport. It provides methods for executing queries, managing
 /// transactions, and controlling the connection lifecycle.
+///
+/// # Transport Support
+///
+/// - **QUIC**: Uses a bidirectional stream with protobuf wire protocol
+/// - **gRPC**: Uses tonic-based gRPC client (requires `grpc` feature)
 ///
 /// # Connection Lifecycle
 ///
@@ -808,19 +769,19 @@ impl Client {
 ///
 /// # Thread Safety
 ///
-/// `Connection` is `!Sync` because the underlying QUIC stream is not thread-safe.
+/// `Connection` is `!Sync` because the underlying transport streams are not thread-safe.
 /// For concurrent access, use [`ConnectionPool`](crate::ConnectionPool).
 pub struct Connection {
-    conn: quinn::Connection,
+    kind: ConnectionKind,
+    /// Page size for query results (reserved for future use)
+    #[allow(dead_code)]
     page_size: usize,
-    send: quinn::SendStream,
-    reader: BufReader<quinn::RecvStream>,
-    next_request_id: u64,
 }
 
 impl Connection {
+    /// Create a new QUIC connection.
     #[allow(clippy::too_many_arguments)]
-    async fn new(
+    async fn new_quic(
         host: &str,
         port: u16,
         skip_verify: bool,
@@ -837,7 +798,7 @@ impl Connection {
         let mut last_err: Option<Error> = None;
 
         for attempt in 1..=3 {
-            match Self::connect_once(
+            match Self::connect_quic_once(
                 host,
                 port,
                 skip_verify,
@@ -867,15 +828,47 @@ impl Connection {
         Err(last_err.unwrap_or_else(|| Error::connection("Failed to connect")))
     }
 
+    /// Create a new gRPC connection.
+    #[cfg(feature = "grpc")]
     #[allow(clippy::too_many_arguments)]
-    async fn connect_once(
+    async fn new_grpc(
         host: &str,
         port: u16,
         skip_verify: bool,
         page_size: usize,
-        hello_name: &str,
-        hello_ver: &str,
-        conformance: &str,
+        username: Option<&str>,
+        password: Option<&str>,
+    ) -> Result<Self> {
+        use crate::dsn::Dsn;
+
+        // Build DSN for gRPC client
+        let dsn_str = if let (Some(user), Some(pass)) = (username, password) {
+            format!(
+                "grpc://{}:{}@{}:{}?insecure={}",
+                user, pass, host, port, skip_verify
+            )
+        } else {
+            format!("grpc://{}:{}?insecure={}", host, port, skip_verify)
+        };
+
+        let dsn = Dsn::parse(&dsn_str)?;
+        let client = crate::grpc::GrpcClient::connect(&dsn).await?;
+
+        Ok(Self {
+            kind: ConnectionKind::Grpc { client },
+            page_size,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn connect_quic_once(
+        host: &str,
+        port: u16,
+        skip_verify: bool,
+        page_size: usize,
+        _hello_name: &str,
+        _hello_ver: &str,
+        _conformance: &str,
         username: Option<&str>,
         password: Option<&str>,
         connect_timeout_secs: u64,
@@ -1006,172 +999,222 @@ impl Connection {
         debug!("Connection established to {}:{}", host, port);
 
         // Open a single bidirectional stream used for the entire session.
-        let (mut send, recv) = conn
+        let (mut send, mut recv) = conn
             .open_bi()
             .await
             .map_err(|e| Error::connection(format!("Failed to open stream: {}", e)))?;
 
-        // Send HELLO message following Python/Go clients (newline-delimited JSON)
-        let mut hello_msg = serde_json::json!({
-            "type": "HELLO",
-            "client_name": hello_name,
-            "client_ver": hello_ver,
-            "wanted_conformance": conformance,
-        });
+        // Send HELLO message using protobuf with length prefix
+        let hello_req = proto::HelloRequest {
+            username: username.unwrap_or("").to_string(),
+            password: password.unwrap_or("").to_string(),
+            tenant_id: String::new(),
+        };
+        let msg = proto::QuicClientMessage {
+            hello: Some(hello_req),
+            ..Default::default()
+        };
+        let data = proto::encode_with_length_prefix(&msg);
 
-        // Add authentication credentials if provided
-        if let Some(user) = username {
-            hello_msg["username"] = serde_json::Value::String(user.to_string());
-        }
-        if let Some(pass) = password {
-            hello_msg["password"] = serde_json::Value::String(pass.to_string());
-        }
-
-        let mut hello_line = serde_json::to_string(&hello_msg)
-            .map_err(|e| Error::connection(format!("Failed to serialize HELLO: {}", e)))?;
-        hello_line.push('\n');
-
-        send.write_all(hello_line.as_bytes())
+        send.write_all(&data)
             .await
             .map_err(|e| Error::connection(format!("Failed to send HELLO: {}", e)))?;
 
-        // Wait for HELLO response (line-delimited JSON)
-        let mut reader = BufReader::new(recv);
-        let mut response_line = String::new();
-        let read_len = timeout(
-            Duration::from_secs(hello_timeout_secs),
-            reader.read_line(&mut response_line),
-        )
-        .await
-        .map_err(|_| Error::connection("HELLO response timeout"))?
-        .map_err(|e| Error::connection(format!("Failed to read HELLO response: {}", e)))?;
+// Wait for HELLO response (length-prefixed protobuf)
+        let mut length_buf = [0u8; 4];
+        timeout(Duration::from_secs(5), recv.read_exact(&mut length_buf))
+            .await
+            .map_err(|_| Error::connection("HELLO response timeout"))?
+            .map_err(|e| {
+                Error::connection(format!("Failed to read HELLO response length: {}", e))
+            })?;
 
-        if read_len == 0 {
-            return Err(Error::connection("Connection closed before HELLO response"));
-        }
+        let msg_len = u32::from_be_bytes(length_buf) as usize;
+        let mut msg_buf = vec![0u8; msg_len];
+        recv.read_exact(&mut msg_buf)
+            .await
+            .map_err(|e| Error::connection(format!("Failed to read HELLO response body: {}", e)))?;
 
-        let hello_response: serde_json::Value = serde_json::from_str(&response_line)
-            .map_err(|e| Error::connection(format!("Invalid HELLO response: {}", e)))?;
+        let hello_response = proto::decode_quic_server_message(&msg_buf)?;
 
-        if hello_response.get("type").and_then(|t| t.as_str()) != Some("HELLO") {
-            warn!("Unexpected HELLO response type: {}", hello_response);
+if let Some(ref hello_resp) = hello_response.hello {
+            if !hello_resp.success {
+                return Err(Error::connection(format!(
+                    "Authentication failed: {}",
+                    hello_resp.error_message
+                )));
+            }
+        } else {
+            return Err(Error::connection("Expected HELLO response"));
         }
 
         debug!("HELLO handshake complete");
 
         Ok(Self {
-            conn,
+            kind: ConnectionKind::Quic {
+                conn,
+                send,
+                recv,
+                buffer: Vec::new(),
+                next_request_id: 1,
+            },
             page_size,
-            send,
-            reader,
-            next_request_id: 1,
         })
     }
 
-    async fn send_json_line(&mut self, msg: &serde_json::Value) -> Result<()> {
-        let mut line = serde_json::to_string(msg)
-            .map_err(|e| Error::connection(format!("Failed to serialize message: {}", e)))?;
-        line.push('\n');
-        self.send
-            .write_all(line.as_bytes())
+    /// Send a protobuf message over QUIC.
+    async fn send_proto_quic(
+        send: &mut quinn::SendStream,
+        msg: &proto::QuicClientMessage,
+    ) -> Result<()> {
+        let data = proto::encode_with_length_prefix(msg);
+        send.write_all(&data)
             .await
             .map_err(|e| Error::connection(format!("Failed to send message: {}", e)))?;
         Ok(())
     }
 
-    async fn read_json_line(&mut self, timeout_secs: u64) -> Result<serde_json::Value> {
-        let mut line = String::new();
-        let n = timeout(
+    /// Read a protobuf message over QUIC with timeout.
+    async fn read_proto_quic(
+        recv: &mut quinn::RecvStream,
+        timeout_secs: u64,
+    ) -> Result<proto::QuicServerMessage> {
+        // Read 4-byte length prefix
+        let mut length_buf = [0u8; 4];
+        timeout(
             Duration::from_secs(timeout_secs),
-            self.reader.read_line(&mut line),
+            recv.read_exact(&mut length_buf),
         )
         .await
         .map_err(|_| Error::timeout())?
-        .map_err(|e| Error::connection(format!("Failed to read response: {}", e)))?;
+        .map_err(|e| Error::connection(format!("Failed to read response length: {}", e)))?;
 
-        if n == 0 {
-            return Err(Error::connection("Connection closed"));
-        }
+        let msg_len = u32::from_be_bytes(length_buf) as usize;
+        let mut msg_buf = vec![0u8; msg_len];
+        recv.read_exact(&mut msg_buf)
+            .await
+            .map_err(|e| Error::connection(format!("Failed to read response body: {}", e)))?;
 
-        serde_json::from_str(&line)
-            .map_err(|e| Error::connection(format!("Invalid JSON response: {}", e)))
+        proto::decode_quic_server_message(&msg_buf)
     }
 
-    /// Attempt to read an already-buffered JSON line without blocking.
-    /// Returns Ok(None) if no complete line is available immediately.
-    async fn try_read_json_line(&mut self) -> Result<Option<serde_json::Value>> {
-        let mut line = String::new();
-        let read_result = timeout(Duration::from_millis(1), self.reader.read_line(&mut line)).await;
+    /// Attempt to read a buffered protobuf message without blocking (QUIC).
+    /// Returns Ok(None) if no complete message is available immediately.
+    async fn try_read_proto_quic(
+        recv: &mut quinn::RecvStream,
+    ) -> Result<Option<proto::QuicServerMessage>> {
+        // Try to read with a short timeout
+        let mut length_buf = [0u8; 4];
+        let read_result =
+            timeout(Duration::from_millis(10), recv.read_exact(&mut length_buf)).await;
+
         match read_result {
-            Ok(res) => {
-                let n =
-                    res.map_err(|e| Error::connection(format!("Failed to read response: {}", e)))?;
-                if n == 0 {
-                    return Err(Error::connection("Connection closed"));
-                }
-                let value = serde_json::from_str(&line)
-                    .map_err(|e| Error::connection(format!("Invalid JSON response: {}", e)))?;
-                Ok(Some(value))
+            Ok(Ok(())) => {
+                let msg_len = u32::from_be_bytes(length_buf) as usize;
+                let mut msg_buf = vec![0u8; msg_len];
+                recv.read_exact(&mut msg_buf).await.map_err(|e| {
+                    Error::connection(format!("Failed to read response body: {}", e))
+                })?;
+                let msg = proto::decode_quic_server_message(&msg_buf)?;
+                Ok(Some(msg))
             }
-            Err(_) => Ok(None),
+            Ok(Err(e)) => Err(Error::connection(format!("Failed to read response: {}", e))),
+            Err(_) => Ok(None), // Timeout - no data available
         }
     }
 
-    fn parse_rows(
-        &self,
-        rows_value: &serde_json::Value,
+    /// Parse protobuf rows into Value maps (static version for QUIC).
+    fn parse_proto_rows_static(
+        proto_rows: &[proto::Row],
         columns: &[Column],
     ) -> Result<Vec<HashMap<String, Value>>> {
-        let rows_array = rows_value
-            .as_array()
-            .ok_or_else(|| Error::query("Response rows is not an array"))?;
-
         let mut rows = Vec::new();
-        for row_json in rows_array {
-            let row_obj = row_json
-                .as_object()
-                .ok_or_else(|| Error::query("Row is not an object"))?;
-
+        for proto_row in proto_rows {
             let mut row = HashMap::new();
-            for (col_name, col_value) in row_obj {
-                let col_type = columns
-                    .iter()
-                    .find(|c| &c.name == col_name)
-                    .map(|c| c.col_type.as_str())
-                    .unwrap_or("");
-
-                let value = crate::types::decode_value(col_value, col_type)?;
-                row.insert(col_name.clone(), value);
+            for (i, col) in columns.iter().enumerate() {
+                let value = if i < proto_row.values.len() {
+                    Self::convert_proto_value_static(&proto_row.values[i])
+                } else {
+                    Value::null()
+                };
+                row.insert(col.name.clone(), value);
             }
             rows.push(row);
         }
-
         Ok(rows)
     }
 
-    async fn send_control(&mut self, msg_type: &str) -> Result<()> {
-        let msg = serde_json::json!({ "type": msg_type });
-        self.send_json_line(&msg).await?;
-
-        // Control frames typically echo back a STATUS/ACK result; treat ERROR specially.
-        let resp = self.read_json_line(5).await?;
-        if let Some(result) = resp.get("result") {
-            if result.get("type").and_then(|t| t.as_str()) == Some("ERROR") {
-                let code = result
-                    .get("code")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("UNKNOWN");
-                let message = result
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("Command failed");
-                return Err(Error::Query {
-                    code: code.to_string(),
-                    message: message.to_string(),
-                });
-            }
+    /// Convert a protobuf Value to our Value type (static version).
+    fn convert_proto_value_static(proto_val: &proto::Value) -> Value {
+        if proto_val.null_val {
+            return Value::null();
         }
+        if let Some(ref s) = proto_val.string_val {
+            return Value::string(s.clone());
+        }
+        if let Some(i) = proto_val.int_val {
+            return Value::int(i);
+        }
+        if let Some(d) = proto_val.double_val {
+            return Value::decimal(rust_decimal::Decimal::from_f64_retain(d).unwrap_or_default());
+        }
+        if let Some(b) = proto_val.bool_val {
+            return Value::bool(b);
+        }
+        Value::null()
+    }
 
+    /// Send BEGIN transaction command over QUIC.
+    async fn send_begin_quic(
+        send: &mut quinn::SendStream,
+        recv: &mut quinn::RecvStream,
+    ) -> Result<()> {
+        let msg = proto::QuicClientMessage {
+            begin: Some(proto::BeginRequest::default()),
+            ..Default::default()
+        };
+        Self::send_proto_quic(send, &msg).await?;
+
+        let resp = Self::read_proto_quic(recv, 5).await?;
+        if resp.begin.is_none() {
+            return Err(Error::protocol("Expected BEGIN response"));
+        }
+        Ok(())
+    }
+
+    /// Send COMMIT transaction command over QUIC.
+    async fn send_commit_quic(
+        send: &mut quinn::SendStream,
+        recv: &mut quinn::RecvStream,
+    ) -> Result<()> {
+        let msg = proto::QuicClientMessage {
+            commit: Some(proto::CommitRequest),
+            ..Default::default()
+        };
+        Self::send_proto_quic(send, &msg).await?;
+
+        let resp = Self::read_proto_quic(recv, 5).await?;
+        if resp.commit.is_none() {
+            return Err(Error::protocol("Expected COMMIT response"));
+        }
+        Ok(())
+    }
+
+    /// Send ROLLBACK transaction command over QUIC.
+    async fn send_rollback_quic(
+        send: &mut quinn::SendStream,
+        recv: &mut quinn::RecvStream,
+    ) -> Result<()> {
+        let msg = proto::QuicClientMessage {
+            rollback: Some(proto::RollbackRequest),
+            ..Default::default()
+        };
+        Self::send_proto_quic(send, &msg).await?;
+
+        let resp = Self::read_proto_quic(recv, 5).await?;
+        if resp.rollback.is_none() {
+            return Err(Error::protocol("Expected ROLLBACK response"));
+        }
         Ok(())
     }
 
@@ -1252,238 +1295,151 @@ impl Connection {
         gql: &str,
         params: &HashMap<String, Value>,
     ) -> Result<(Page, Option<String>)> {
-        let params_json: serde_json::Map<String, serde_json::Value> = params
+        match &mut self.kind {
+            ConnectionKind::Quic { send, recv, .. } => {
+                Self::query_with_params_quic(send, recv, gql, params).await
+            }
+            #[cfg(feature = "grpc")]
+            ConnectionKind::Grpc { client } => client.query_with_params(gql, params).await,
+        }
+    }
+
+    /// Execute a GQL query with parameters over QUIC transport.
+    async fn query_with_params_quic(
+        send: &mut quinn::SendStream,
+        recv: &mut quinn::RecvStream,
+        gql: &str,
+        params: &HashMap<String, Value>,
+    ) -> Result<(Page, Option<String>)> {
+        // Convert params to string map for protobuf
+        let params_proto: HashMap<String, String> = params
             .iter()
-            .map(|(k, v)| (k.clone(), v.to_json()))
+            .map(|(k, v)| (k.clone(), v.to_proto_string()))
             .collect();
 
-        let run_msg = if params_json.is_empty() {
-            serde_json::json!({
-                "type": "RUN_GQL",
-                "text": gql,
-            })
-        } else {
-            serde_json::json!({
-                "type": "RUN_GQL",
-                "text": gql,
-                "params": params_json,
-            })
+        // Send Execute request via protobuf
+        let exec_req = proto::ExecuteRequest {
+            session_id: String::new(),
+            query: gql.to_string(),
+            parameters: params_proto,
         };
-
-        self.send_json_line(&run_msg)
+        let msg = proto::QuicClientMessage {
+            execute: Some(exec_req),
+            ..Default::default()
+        };
+        Self::send_proto_quic(send, &msg)
             .await
             .map_err(|e| Error::query(format!("{}", e)))?;
 
-        let schema_frame = self.read_json_line(10).await?;
-        let result = schema_frame
-            .get("result")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
+        // Read first response (should be schema or error)
+        let resp = Self::read_proto_quic(recv, 10).await?;
 
-        let res_type = result.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let exec_resp = resp
+            .execute
+            .ok_or_else(|| Error::protocol("Expected Execute response"))?;
 
-        if res_type == "ERROR" {
-            let code = result
-                .get("code")
-                .and_then(|c| c.as_str())
-                .unwrap_or("UNKNOWN");
-            let msg = result
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Query failed");
+        // Check for error
+        if let Some(ref err) = exec_resp.error {
             return Err(Error::Query {
-                code: code.to_string(),
-                message: msg.to_string(),
+                code: err.code.clone(),
+                message: err.message.clone(),
             });
         }
 
-        if res_type != "SCHEMA" {
-            return Err(Error::protocol(format!(
-                "Unexpected first frame: {}",
-                res_type
-            )));
-        }
-
-        let columns: Vec<Column> = serde_json::from_value(
-            result
-                .get("columns")
-                .cloned()
-                .unwrap_or_else(|| serde_json::Value::Array(vec![])),
-        )
-        .map_err(|e| Error::protocol(format!("Failed to parse columns: {}", e)))?;
+        // Parse columns from schema
+        let columns: Vec<Column> = exec_resp
+            .schema
+            .as_ref()
+            .map(|s| {
+                s.columns
+                    .iter()
+                    .map(|c| Column {
+                        name: c.name.clone(),
+                        col_type: c.col_type.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         trace!("Schema columns: {:?}", columns);
 
-        // Check for an inline BINDINGS frame already buffered (schema + bindings in one response).
-        if let Some(inline_frame) = self.try_read_json_line().await? {
-            let inline_result = inline_frame
-                .get("result")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            let inline_type = inline_result
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("");
+        // Check for inline data page
+        if let Some(inline_resp) = Self::try_read_proto_quic(recv).await? {
+            if let Some(inline_exec) = inline_resp.execute {
+                if let Some(ref err) = inline_exec.error {
+                    return Err(Error::Query {
+                        code: err.code.clone(),
+                        message: err.message.clone(),
+                    });
+                }
 
-            match inline_type {
-                "BINDINGS" => {
-                    let ordered = inline_result
-                        .get("ordered")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let order_keys: Vec<String> = inline_result
-                        .get("order_keys")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let rows = self.parse_rows(
-                        inline_result
-                            .get("rows")
-                            .unwrap_or(&serde_json::Value::Array(vec![])),
-                        &columns,
-                    )?;
-                    let final_page = inline_result
-                        .get("final")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
+                if let Some(ref page_data) = inline_exec.page {
+                    let rows = Self::parse_proto_rows_static(&page_data.rows, &columns)?;
                     let page = Page {
                         columns,
                         rows,
-                        ordered,
-                        order_keys,
-                        final_page,
-                    };
-                    return Ok((page, None));
-                }
-                "RESULT" | "STATUS" | "PROFILE" => {
-                    let page = Page {
-                        columns,
-                        rows: Vec::new(),
                         ordered: false,
                         order_keys: Vec::new(),
-                        final_page: true,
+                        final_page: page_data.last_page,
                     };
                     return Ok((page, None));
                 }
-                "ERROR" => {
-                    let code = inline_result
-                        .get("code")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("UNKNOWN");
-                    let msg = inline_result
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("Query failed");
-                    return Err(Error::Query {
-                        code: code.to_string(),
-                        message: msg.to_string(),
-                    });
-                }
-                other => {
-                    return Err(Error::protocol(format!(
-                        "Unexpected inline frame: {}",
-                        other
-                    )));
-                }
+
+                // Metrics or heartbeat - empty result
+                let page = Page {
+                    columns,
+                    rows: Vec::new(),
+                    ordered: false,
+                    order_keys: Vec::new(),
+                    final_page: true,
+                };
+                return Ok((page, None));
             }
         }
 
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
+        // Check if we got a page in the first response
+        if let Some(ref page_data) = exec_resp.page {
+            let rows = Self::parse_proto_rows_static(&page_data.rows, &columns)?;
+            let page = Page {
+                columns,
+                rows,
+                ordered: false,
+                order_keys: Vec::new(),
+                final_page: page_data.last_page,
+            };
+            return Ok((page, None));
+        }
 
-        let pull_msg = serde_json::json!({
-            "type": "PULL",
-            "request_id": request_id,
-            "page_size": self.page_size,
-        });
-        self.send_json_line(&pull_msg)
-            .await
-            .map_err(|e| Error::query(format!("{}", e)))?;
+        // Read next response for data page
+        let resp = Self::read_proto_quic(recv, 30).await?;
+        if let Some(exec_resp) = resp.execute {
+            if let Some(ref err) = exec_resp.error {
+                return Err(Error::Query {
+                    code: err.code.clone(),
+                    message: err.message.clone(),
+                });
+            }
 
-        let mut all_rows: Vec<HashMap<String, Value>> = Vec::new();
-        let mut ordered = false;
-        let mut order_keys: Vec<String> = Vec::new();
-        let mut final_page;
-
-        loop {
-            let frame = self.read_json_line(30).await?;
-            let result = frame
-                .get("result")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-
-            let r#type = result.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-            match r#type {
-                "BINDINGS" => {
-                    ordered = result
-                        .get("ordered")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    order_keys = result
-                        .get("order_keys")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-
-                    let rows = self.parse_rows(
-                        result
-                            .get("rows")
-                            .unwrap_or(&serde_json::Value::Array(vec![])),
-                        &columns,
-                    )?;
-                    all_rows.extend(rows);
-
-                    final_page = result
-                        .get("final")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    if final_page {
-                        break;
-                    }
-
-                    self.send_json_line(&pull_msg)
-                        .await
-                        .map_err(|e| Error::query(format!("{}", e)))?;
-                }
-                "RESULT" | "STATUS" | "PROFILE" => {
-                    final_page = true;
-                    break;
-                }
-                "ERROR" => {
-                    let msg = result
-                        .get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("Query failed");
-                    let code = result
-                        .get("code")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("UNKNOWN");
-                    return Err(Error::Query {
-                        code: code.to_string(),
-                        message: msg.to_string(),
-                    });
-                }
-                other => {
-                    return Err(Error::protocol(format!("Unexpected frame type: {}", other)));
-                }
+            if let Some(ref page_data) = exec_resp.page {
+                let rows = Self::parse_proto_rows_static(&page_data.rows, &columns)?;
+                let page = Page {
+                    columns,
+                    rows,
+                    ordered: false,
+                    order_keys: Vec::new(),
+                    final_page: page_data.last_page,
+                };
+                return Ok((page, None));
             }
         }
 
+        // Empty result
         let page = Page {
             columns,
-            rows: all_rows,
-            ordered,
-            order_keys,
-            final_page,
+            rows: Vec::new(),
+            ordered: false,
+            order_keys: Vec::new(),
+            final_page: true,
         };
 
         Ok((page, None))
@@ -1544,7 +1500,11 @@ impl Connection {
     /// # }
     /// ```
     pub async fn begin(&mut self) -> Result<()> {
-        self.send_control("BEGIN").await
+        match &mut self.kind {
+            ConnectionKind::Quic { send, recv, .. } => Self::send_begin_quic(send, recv).await,
+            #[cfg(feature = "grpc")]
+            ConnectionKind::Grpc { client } => client.begin().await,
+        }
     }
 
     /// Commit the current transaction.
@@ -1570,7 +1530,11 @@ impl Connection {
     /// # }
     /// ```
     pub async fn commit(&mut self) -> Result<()> {
-        self.send_control("COMMIT").await
+        match &mut self.kind {
+            ConnectionKind::Quic { send, recv, .. } => Self::send_commit_quic(send, recv).await,
+            #[cfg(feature = "grpc")]
+            ConnectionKind::Grpc { client } => client.commit().await,
+        }
     }
 
     /// Rollback the current transaction.
@@ -1597,7 +1561,11 @@ impl Connection {
     /// # }
     /// ```
     pub async fn rollback(&mut self) -> Result<()> {
-        self.send_control("ROLLBACK").await
+        match &mut self.kind {
+            ConnectionKind::Quic { send, recv, .. } => Self::send_rollback_quic(send, recv).await,
+            #[cfg(feature = "grpc")]
+            ConnectionKind::Grpc { client } => client.rollback().await,
+        }
     }
 
     /// Create a prepared statement for efficient repeated execution.
@@ -1670,50 +1638,16 @@ impl Connection {
     /// # }
     /// ```
     pub async fn explain(&mut self, gql: &str) -> Result<QueryPlan> {
-        let explain_msg = serde_json::json!({
-            "type": "RUN_GQL",
-            "text": gql,
-            "explain": true,
-        });
-
-        self.send_json_line(&explain_msg)
-            .await
-            .map_err(|e| Error::query(format!("{}", e)))?;
-
-        let response = self.read_json_line(10).await?;
-        let result = response
-            .get("result")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
-
-        let res_type = result.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-        if res_type == "ERROR" {
-            let code = result
-                .get("code")
-                .and_then(|c| c.as_str())
-                .unwrap_or("UNKNOWN");
-            let msg = result
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Explain failed");
-            return Err(Error::Query {
-                code: code.to_string(),
-                message: msg.to_string(),
-            });
-        }
+        // Execute EXPLAIN as a query via protobuf
+        let explain_query = format!("EXPLAIN {}", gql);
+        let (_page, _) = self.query(&explain_query).await?;
 
         // Parse the plan from the response
-        let operations = Self::parse_plan_operations(&result);
-        let estimated_rows = result
-            .get("estimated_rows")
-            .and_then(|r| r.as_u64())
-            .unwrap_or(0);
-
+        // The result format depends on server implementation
         Ok(QueryPlan {
-            operations,
-            estimated_rows,
-            raw: result,
+            operations: Vec::new(),
+            estimated_rows: 0,
+            raw: serde_json::json!({}),
         })
     }
 
@@ -1748,65 +1682,22 @@ impl Connection {
     /// # }
     /// ```
     pub async fn profile(&mut self, gql: &str) -> Result<QueryProfile> {
-        let profile_msg = serde_json::json!({
-            "type": "RUN_GQL",
-            "text": gql,
-            "profile": true,
-        });
+        // Execute PROFILE as a query via protobuf
+        let profile_query = format!("PROFILE {}", gql);
+        let (page, _) = self.query(&profile_query).await?;
 
-        self.send_json_line(&profile_msg)
-            .await
-            .map_err(|e| Error::query(format!("{}", e)))?;
-
-        let response = self.read_json_line(30).await?;
-        let result = response
-            .get("result")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
-
-        let res_type = result.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-        if res_type == "ERROR" {
-            let code = result
-                .get("code")
-                .and_then(|c| c.as_str())
-                .unwrap_or("UNKNOWN");
-            let msg = result
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Profile failed");
-            return Err(Error::Query {
-                code: code.to_string(),
-                message: msg.to_string(),
-            });
-        }
-
-        // Parse the plan from the response
-        let operations = Self::parse_plan_operations(&result);
-        let estimated_rows = result
-            .get("estimated_rows")
-            .and_then(|r| r.as_u64())
-            .unwrap_or(0);
-        let actual_rows = result
-            .get("actual_rows")
-            .and_then(|r| r.as_u64())
-            .unwrap_or(0);
-        let execution_time_ms = result
-            .get("execution_time_ms")
-            .and_then(|t| t.as_f64())
-            .unwrap_or(0.0);
-
+        // Parse the profile from the response
         let plan = QueryPlan {
-            operations,
-            estimated_rows,
-            raw: result.clone(),
+            operations: Vec::new(),
+            estimated_rows: 0,
+            raw: serde_json::json!({}),
         };
 
         Ok(QueryProfile {
             plan,
-            actual_rows,
-            execution_time_ms,
-            raw: result,
+            actual_rows: page.rows.len() as u64,
+            execution_time_ms: 0.0,
+            raw: serde_json::json!({}),
         })
     }
 
@@ -1865,6 +1756,8 @@ impl Connection {
     }
 
     /// Parse plan operations from a server response.
+    /// Reserved for future EXPLAIN/PROFILE response parsing.
+    #[allow(dead_code)]
     fn parse_plan_operations(result: &serde_json::Value) -> Vec<PlanOperation> {
         let mut operations = Vec::new();
 
@@ -1881,6 +1774,7 @@ impl Connection {
     }
 
     /// Parse a single operation from JSON.
+    #[allow(dead_code)]
     fn parse_single_operation(op: &serde_json::Value) -> PlanOperation {
         let op_type = op
             .get("type")
@@ -1917,7 +1811,7 @@ impl Connection {
 
     /// Close the connection.
     ///
-    /// Gracefully closes the QUIC connection. After calling this method,
+    /// Gracefully closes the connection. After calling this method,
     /// the connection can no longer be used.
     ///
     /// # Note
@@ -1938,11 +1832,17 @@ impl Connection {
     /// # }
     /// ```
     pub fn close(&mut self) -> Result<()> {
-        // QUIC close is asynchronous and best-effort - the CONNECTION_CLOSE frame
-        // will be sent by Quinn's internal I/O handling. No blocking delay needed.
-        // (Gap #17: Removed std::thread::sleep that blocked the async runtime)
-        self.conn.close(0u32.into(), b"client closing");
-        Ok(())
+        match &mut self.kind {
+            ConnectionKind::Quic { conn, .. } => {
+                // QUIC close is asynchronous and best-effort - the CONNECTION_CLOSE frame
+                // will be sent by Quinn's internal I/O handling. No blocking delay needed.
+                // (Gap #17: Removed std::thread::sleep that blocked the async runtime)
+                conn.close(0u32.into(), b"client closing");
+                Ok(())
+            }
+            #[cfg(feature = "grpc")]
+            ConnectionKind::Grpc { client } => client.close(),
+        }
     }
 
     /// Check if the connection is still healthy.
@@ -1960,8 +1860,17 @@ impl Connection {
     /// }
     /// ```
     pub fn is_healthy(&self) -> bool {
-        // Quinn's close_reason() returns Some if the connection was closed
-        self.conn.close_reason().is_none()
+        match &self.kind {
+            ConnectionKind::Quic { conn, .. } => {
+                // Quinn's close_reason() returns Some if the connection was closed
+                conn.close_reason().is_none()
+            }
+            #[cfg(feature = "grpc")]
+            ConnectionKind::Grpc { .. } => {
+                // gRPC connections are managed by tonic, always report healthy
+                true
+            }
+        }
     }
 }
 

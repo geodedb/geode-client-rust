@@ -1,8 +1,8 @@
 // Build script for geode-client
-// Configures BoringSSL build for Nix environment
+// Configures build environment
 
 fn main() {
-    // Get glibc paths from environment
+    // Get glibc paths from environment for Nix compatibility
     let glibc_include = std::env::var("CFLAGS")
         .or_else(|_| std::env::var("CMAKE_C_FLAGS"))
         .unwrap_or_default();
@@ -22,8 +22,15 @@ fn main() {
         println!("cargo:rustc-env=CMAKE_CXX_FLAGS={}", glibc_cxx_include);
     }
 
-    // Also try to export CXXSTDLIB environment variable for libc++ if needed
+    // Export LDFLAGS for libc++ if needed
     if let Ok(gcc_lib) = std::env::var("NIX_LDFLAGS") {
         println!("cargo:rustc-env=LDFLAGS={}", gcc_lib);
     }
+
+    // Note: Protobuf types are manually implemented in src/proto.rs
+    // to avoid requiring protoc at build time. This follows the pattern
+    // of many Rust libraries that want to be easy to build.
+    //
+    // The manual implementation is compatible with the geode.proto schema
+    // and supports both QUIC (length-prefixed protobuf) and gRPC transports.
 }

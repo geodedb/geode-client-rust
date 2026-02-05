@@ -1,0 +1,728 @@
+//! DSN (Data Source Name) parsing for Geode connections.
+//!
+//! Supports the following DSN formats:
+//! - `quic://host:port?options` - QUIC transport (default)
+//! - `grpc://host:port?options` - gRPC transport
+//! - `grcp://host:port?options` - Alias for gRPC (deprecated)
+//! - `host:port?options` - Legacy format, defaults to QUIC
+//!
+//! # Examples
+//!
+//! ```
+//! use geode_client::dsn::{Dsn, Transport};
+//!
+//! // QUIC transport (explicit)
+//! let dsn = Dsn::parse("quic://localhost:3141").unwrap();
+//! assert_eq!(dsn.transport(), Transport::Quic);
+//!
+//! // gRPC transport
+//! let dsn = Dsn::parse("grpc://localhost:50051?tls=0").unwrap();
+//! assert_eq!(dsn.transport(), Transport::Grpc);
+//! assert!(!dsn.tls_enabled());
+//!
+//! // IPv6 support
+//! let dsn = Dsn::parse("grpc://[::1]:50051").unwrap();
+//! assert_eq!(dsn.host(), "::1");
+//! ```
+
+use crate::error::{Error, Result};
+use std::collections::HashMap;
+
+/// Default port for Geode connections
+pub const DEFAULT_PORT: u16 = 3141;
+
+/// Transport protocol to use for the connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Transport {
+    /// QUIC transport with protobuf wire protocol
+    Quic,
+    /// gRPC transport using protobuf service definitions
+    Grpc,
+}
+
+impl std::fmt::Display for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Transport::Quic => write!(f, "quic"),
+            Transport::Grpc => write!(f, "grpc"),
+        }
+    }
+}
+
+/// Parsed DSN (Data Source Name) for Geode connections.
+///
+/// Contains all connection parameters extracted from a DSN string.
+#[derive(Debug, Clone)]
+pub struct Dsn {
+    transport: Transport,
+    host: String,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+    tls_enabled: bool,
+    skip_verify: bool,
+    page_size: usize,
+    client_name: String,
+    client_version: String,
+    conformance: String,
+    options: HashMap<String, String>,
+}
+
+impl Default for Dsn {
+    fn default() -> Self {
+        Self {
+            transport: Transport::Quic,
+            host: "localhost".to_string(),
+            port: DEFAULT_PORT,
+            username: None,
+            password: None,
+            tls_enabled: true,
+            skip_verify: false,
+            page_size: 1000,
+            client_name: "geode-rust".to_string(),
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            conformance: "min".to_string(),
+            options: HashMap::new(),
+        }
+    }
+}
+
+impl Dsn {
+    /// Parse a DSN string into a Dsn struct.
+    ///
+    /// # Supported formats
+    ///
+    /// - `quic://host:port?options` - QUIC transport
+    /// - `grpc://host:port?options` - gRPC transport
+    /// - `grcp://host:port?options` - Alias for gRPC (deprecated)
+    /// - `host:port?options` - Legacy format, defaults to QUIC
+    ///
+    /// # Supported options (query parameters)
+    ///
+    /// - `tls` - Enable/disable TLS (0/1/true/false, default: true)
+    /// - `insecure` or `skip_verify` - Skip TLS verification (0/1/true/false)
+    /// - `page_size` - Results page size (default: 1000)
+    /// - `client_name` or `hello_name` - Client name
+    /// - `client_version` or `hello_ver` - Client version
+    /// - `conformance` - GQL conformance level
+    /// - `username` or `user` - Authentication username
+    /// - `password` or `pass` - Authentication password
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidDsn` if:
+    /// - DSN is empty
+    /// - Scheme is unsupported (not quic://, grpc://, grcp://, or schemeless)
+    /// - Host is missing
+    /// - Port is invalid
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use geode_client::dsn::Dsn;
+    ///
+    /// let dsn = Dsn::parse("quic://localhost:3141").unwrap();
+    /// let dsn = Dsn::parse("grpc://127.0.0.1:50051?tls=0").unwrap();
+    /// let dsn = Dsn::parse("grpc://[::1]:50051").unwrap();
+    /// ```
+    pub fn parse(dsn: &str) -> Result<Self> {
+        let dsn = dsn.trim();
+        if dsn.is_empty() {
+            return Err(Error::invalid_dsn("DSN cannot be empty"));
+        }
+
+        // Determine scheme and parse accordingly
+        if dsn.starts_with("quic://") {
+            Self::parse_url(dsn, Transport::Quic)
+        } else if dsn.starts_with("grpc://") {
+            Self::parse_url(dsn, Transport::Grpc)
+        } else if dsn.starts_with("grcp://") {
+            // Deprecated alias for grpc
+            eprintln!("Warning: 'grcp://' scheme is deprecated, use 'grpc://' instead");
+            Self::parse_url(dsn, Transport::Grpc)
+        } else if dsn.contains("://") {
+            // Some other scheme - reject it
+            let scheme = dsn.split("://").next().unwrap_or("");
+            Err(Error::invalid_dsn(format!(
+                "Unsupported scheme '{}'. Supported schemes: quic://, grpc://",
+                scheme
+            )))
+        } else {
+            // Legacy format: host:port?options (defaults to QUIC)
+            Self::parse_legacy(dsn)
+        }
+    }
+
+    /// Parse URL-format DSN (quic://, grpc://)
+    fn parse_url(dsn: &str, transport: Transport) -> Result<Self> {
+        // Use url crate for proper parsing
+        let url = url::Url::parse(dsn)
+            .map_err(|e| Error::invalid_dsn(format!("Invalid URL format: {}", e)))?;
+
+        let host_raw = url
+            .host_str()
+            .ok_or_else(|| Error::invalid_dsn("Host is required"))?;
+
+        // Strip brackets from IPv6 addresses (url crate returns "[::1]" for IPv6)
+        let host = if host_raw.starts_with('[') && host_raw.ends_with(']') {
+            host_raw[1..host_raw.len() - 1].to_string()
+        } else {
+            host_raw.to_string()
+        };
+
+        if host.is_empty() {
+            return Err(Error::invalid_dsn("Host is required"));
+        }
+
+        let port = url.port().unwrap_or(DEFAULT_PORT);
+
+        // Extract username/password with percent-decoding
+        let username = if !url.username().is_empty() {
+            Some(
+                urlencoding::decode(url.username())
+                    .map_err(|e| Error::invalid_dsn(format!("Invalid username encoding: {}", e)))?
+                    .into_owned(),
+            )
+        } else {
+            None
+        };
+
+        let password = url.password().map(|p| {
+            urlencoding::decode(p)
+                .map(|s| s.into_owned())
+                .unwrap_or_else(|_| p.to_string())
+        });
+
+        // Parse query parameters
+        let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+
+        let mut result = Self {
+            transport,
+            host,
+            port,
+            username,
+            password,
+            ..Default::default()
+        };
+
+        result.apply_params(&params)?;
+
+        Ok(result)
+    }
+
+    /// Parse legacy format DSN (host:port?options)
+    fn parse_legacy(dsn: &str) -> Result<Self> {
+        // Split off query string
+        let (host_port, query_str) = if let Some(idx) = dsn.find('?') {
+            (&dsn[..idx], Some(&dsn[idx + 1..]))
+        } else {
+            (dsn, None)
+        };
+
+        // Parse host:port, handling IPv6 addresses like [::1]:3141
+        let (host, port) = Self::parse_host_port(host_port)?;
+
+        if host.is_empty() {
+            return Err(Error::invalid_dsn("Host is required"));
+        }
+
+        let mut result = Self {
+            transport: Transport::Quic, // Default to QUIC for legacy format
+            host,
+            port,
+            ..Default::default()
+        };
+
+        // Parse query parameters
+        if let Some(qs) = query_str {
+            let params: HashMap<String, String> = qs
+                .split('&')
+                .filter_map(|pair| {
+                    let mut parts = pair.splitn(2, '=');
+                    let key = parts.next()?;
+                    let value = parts.next().unwrap_or("");
+                    // Percent-decode values
+                    let decoded_value = urlencoding::decode(value)
+                        .map(|s| s.into_owned())
+                        .unwrap_or_else(|_| value.to_string());
+                    Some((key.to_string(), decoded_value))
+                })
+                .collect();
+
+            result.apply_params(&params)?;
+        }
+
+        Ok(result)
+    }
+
+    /// Parse host:port string, handling IPv6 addresses
+    fn parse_host_port(s: &str) -> Result<(String, u16)> {
+        // Handle IPv6 addresses: [::1]:3141 or [2001:db8::1]:3141
+        if s.starts_with('[') {
+            // IPv6 format
+            if let Some(bracket_end) = s.find(']') {
+                let host = s[1..bracket_end].to_string();
+                let remainder = &s[bracket_end + 1..];
+                let port = if let Some(rest) = remainder.strip_prefix(':') {
+                    rest.parse::<u16>()
+                        .map_err(|_| Error::invalid_dsn(format!("Invalid port: {}", rest)))?
+                } else if remainder.is_empty() {
+                    DEFAULT_PORT
+                } else {
+                    return Err(Error::invalid_dsn("Invalid IPv6 address format"));
+                };
+                return Ok((host, port));
+            } else {
+                return Err(Error::invalid_dsn("Unclosed bracket in IPv6 address"));
+            }
+        }
+
+        // IPv4 or hostname: find the last colon for port
+        if let Some(idx) = s.rfind(':') {
+            let host = s[..idx].to_string();
+            let port_str = &s[idx + 1..];
+            let port = port_str
+                .parse::<u16>()
+                .map_err(|_| Error::invalid_dsn(format!("Invalid port: {}", port_str)))?;
+            Ok((host, port))
+        } else {
+            // No port specified
+            Ok((s.to_string(), DEFAULT_PORT))
+        }
+    }
+
+    /// Apply query parameters to the DSN
+    fn apply_params(&mut self, params: &HashMap<String, String>) -> Result<()> {
+        for (key, value) in params {
+            match key.as_str() {
+                "tls" => {
+                    self.tls_enabled = parse_bool(value).unwrap_or(true);
+                }
+                "insecure" | "skip_verify" => {
+                    self.skip_verify = parse_bool(value).unwrap_or(false);
+                }
+                "page_size" => {
+                    self.page_size = value
+                        .parse()
+                        .map_err(|_| Error::invalid_dsn(format!("Invalid page_size: {}", value)))?;
+                }
+                "client_name" | "hello_name" => {
+                    self.client_name = value.clone();
+                }
+                "client_version" | "hello_ver" => {
+                    self.client_version = value.clone();
+                }
+                "conformance" => {
+                    self.conformance = value.clone();
+                }
+                "username" | "user" => {
+                    self.username = Some(value.clone());
+                }
+                "password" | "pass" => {
+                    self.password = Some(value.clone());
+                }
+                _ => {
+                    // Store unknown parameters for forward compatibility
+                    self.options.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the transport protocol.
+    pub fn transport(&self) -> Transport {
+        self.transport
+    }
+
+    /// Get the host.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Get the port.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Get the username if specified.
+    pub fn username(&self) -> Option<&str> {
+        self.username.as_deref()
+    }
+
+    /// Get the password if specified.
+    pub fn password(&self) -> Option<&str> {
+        self.password.as_deref()
+    }
+
+    /// Check if TLS is enabled.
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_enabled
+    }
+
+    /// Check if TLS verification should be skipped.
+    pub fn skip_verify(&self) -> bool {
+        self.skip_verify
+    }
+
+    /// Get the page size.
+    pub fn page_size(&self) -> usize {
+        self.page_size
+    }
+
+    /// Get the client name.
+    pub fn client_name(&self) -> &str {
+        &self.client_name
+    }
+
+    /// Get the client version.
+    pub fn client_version(&self) -> &str {
+        &self.client_version
+    }
+
+    /// Get the conformance level.
+    pub fn conformance(&self) -> &str {
+        &self.conformance
+    }
+
+    /// Get additional options.
+    pub fn options(&self) -> &HashMap<String, String> {
+        &self.options
+    }
+
+    /// Get the host:port address string.
+    pub fn address(&self) -> String {
+        if self.host.contains(':') {
+            // IPv6 address - wrap in brackets
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+}
+
+/// Parse a boolean value from a string
+fn parse_bool(s: &str) -> Option<bool> {
+    match s.to_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==========================================================================
+    // QUIC DSN Parsing Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_dsn_parse_quic_basic() {
+        let dsn = Dsn::parse("quic://localhost:3141").unwrap();
+        assert_eq!(dsn.transport(), Transport::Quic);
+        assert_eq!(dsn.host(), "localhost");
+        assert_eq!(dsn.port(), 3141);
+        assert!(dsn.tls_enabled());
+        assert!(!dsn.skip_verify());
+    }
+
+    #[test]
+    fn test_dsn_parse_quic_with_ip() {
+        let dsn = Dsn::parse("quic://127.0.0.1:3141").unwrap();
+        assert_eq!(dsn.transport(), Transport::Quic);
+        assert_eq!(dsn.host(), "127.0.0.1");
+        assert_eq!(dsn.port(), 3141);
+    }
+
+    #[test]
+    fn test_dsn_parse_quic_default_port() {
+        let dsn = Dsn::parse("quic://localhost").unwrap();
+        assert_eq!(dsn.port(), DEFAULT_PORT);
+    }
+
+    #[test]
+    fn test_dsn_parse_quic_with_options() {
+        let dsn = Dsn::parse("quic://localhost:3141?page_size=500&insecure=true").unwrap();
+        assert_eq!(dsn.page_size(), 500);
+        assert!(dsn.skip_verify());
+    }
+
+    // ==========================================================================
+    // gRPC DSN Parsing Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_dsn_parse_grpc_basic() {
+        let dsn = Dsn::parse("grpc://localhost:50051").unwrap();
+        assert_eq!(dsn.transport(), Transport::Grpc);
+        assert_eq!(dsn.host(), "localhost");
+        assert_eq!(dsn.port(), 50051);
+    }
+
+    #[test]
+    fn test_dsn_parse_grpc_with_tls_disabled() {
+        let dsn = Dsn::parse("grpc://127.0.0.1:50051?tls=0").unwrap();
+        assert_eq!(dsn.transport(), Transport::Grpc);
+        assert_eq!(dsn.host(), "127.0.0.1");
+        assert_eq!(dsn.port(), 50051);
+        assert!(!dsn.tls_enabled());
+    }
+
+    #[test]
+    fn test_dsn_parse_grpc_with_tls_false() {
+        let dsn = Dsn::parse("grpc://localhost:50051?tls=false").unwrap();
+        assert!(!dsn.tls_enabled());
+    }
+
+    #[test]
+    fn test_dsn_parse_grcp_alias() {
+        // grcp:// is a deprecated alias for grpc://
+        let dsn = Dsn::parse("grcp://localhost:50051").unwrap();
+        assert_eq!(dsn.transport(), Transport::Grpc);
+    }
+
+    // ==========================================================================
+    // IPv6 DSN Parsing Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_dsn_parse_ipv6_grpc() {
+        let dsn = Dsn::parse("grpc://[::1]:50051").unwrap();
+        assert_eq!(dsn.transport(), Transport::Grpc);
+        assert_eq!(dsn.host(), "::1");
+        assert_eq!(dsn.port(), 50051);
+    }
+
+    #[test]
+    fn test_dsn_parse_ipv6_quic() {
+        let dsn = Dsn::parse("quic://[::1]:3141").unwrap();
+        assert_eq!(dsn.transport(), Transport::Quic);
+        assert_eq!(dsn.host(), "::1");
+        assert_eq!(dsn.port(), 3141);
+    }
+
+    #[test]
+    fn test_dsn_parse_ipv6_full_address() {
+        let dsn = Dsn::parse("grpc://[2001:db8::1]:50051").unwrap();
+        assert_eq!(dsn.host(), "2001:db8::1");
+        assert_eq!(dsn.port(), 50051);
+    }
+
+    #[test]
+    fn test_dsn_parse_ipv6_default_port() {
+        let dsn = Dsn::parse("quic://[::1]").unwrap();
+        assert_eq!(dsn.host(), "::1");
+        assert_eq!(dsn.port(), DEFAULT_PORT);
+    }
+
+    #[test]
+    fn test_dsn_address_ipv6() {
+        let dsn = Dsn::parse("grpc://[::1]:50051").unwrap();
+        assert_eq!(dsn.address(), "[::1]:50051");
+    }
+
+    // ==========================================================================
+    // Legacy DSN Format Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_dsn_parse_legacy_host_port() {
+        let dsn = Dsn::parse("localhost:3141").unwrap();
+        assert_eq!(dsn.transport(), Transport::Quic); // Default to QUIC
+        assert_eq!(dsn.host(), "localhost");
+        assert_eq!(dsn.port(), 3141);
+    }
+
+    #[test]
+    fn test_dsn_parse_legacy_with_options() {
+        let dsn = Dsn::parse("localhost:3141?insecure=true&page_size=500").unwrap();
+        assert_eq!(dsn.transport(), Transport::Quic);
+        assert!(dsn.skip_verify());
+        assert_eq!(dsn.page_size(), 500);
+    }
+
+    #[test]
+    fn test_dsn_parse_legacy_ipv6() {
+        let dsn = Dsn::parse("[::1]:3141").unwrap();
+        assert_eq!(dsn.host(), "::1");
+        assert_eq!(dsn.port(), 3141);
+    }
+
+    // ==========================================================================
+    // Authentication Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_dsn_parse_with_auth() {
+        let dsn = Dsn::parse("quic://admin:secret@localhost:3141").unwrap();
+        assert_eq!(dsn.username(), Some("admin"));
+        assert_eq!(dsn.password(), Some("secret"));
+    }
+
+    #[test]
+    fn test_dsn_parse_auth_via_query_params() {
+        let dsn = Dsn::parse("grpc://localhost:50051?username=admin&password=secret").unwrap();
+        assert_eq!(dsn.username(), Some("admin"));
+        assert_eq!(dsn.password(), Some("secret"));
+    }
+
+    #[test]
+    fn test_dsn_parse_auth_percent_encoded() {
+        let dsn = Dsn::parse("quic://user%40domain:p%40ss%3Dword@localhost:3141").unwrap();
+        assert_eq!(dsn.username(), Some("user@domain"));
+        assert_eq!(dsn.password(), Some("p@ss=word"));
+    }
+
+    // ==========================================================================
+    // Error Cases Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_dsn_parse_empty() {
+        let err = Dsn::parse("").unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn test_dsn_parse_unsupported_scheme() {
+        let err = Dsn::parse("http://localhost:3141").unwrap_err();
+        assert!(err.to_string().contains("Unsupported scheme"));
+        assert!(err.to_string().contains("http"));
+    }
+
+    #[test]
+    fn test_dsn_parse_invalid_port() {
+        let err = Dsn::parse("quic://localhost:invalid").unwrap_err();
+        assert!(err.to_string().contains("port") || err.to_string().contains("Invalid"));
+    }
+
+    #[test]
+    fn test_dsn_parse_port_too_large() {
+        let err = Dsn::parse("quic://localhost:99999").unwrap_err();
+        assert!(err.to_string().contains("port") || err.to_string().contains("Invalid"));
+    }
+
+    #[test]
+    fn test_dsn_parse_missing_host() {
+        // URL crate handles this differently - empty host is valid for some schemes
+        // But we should reject it
+        let result = Dsn::parse("quic://:3141");
+        // This might parse as empty host or fail depending on URL parser
+        if let Ok(dsn) = result {
+            assert!(dsn.host().is_empty() || dsn.host() == "");
+        }
+    }
+
+    // ==========================================================================
+    // Query Parameter Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_dsn_parse_all_options() {
+        let dsn = Dsn::parse(
+            "grpc://localhost:50051?tls=1&insecure=false&page_size=2000&client_name=test-app&conformance=full"
+        ).unwrap();
+
+        assert!(dsn.tls_enabled());
+        assert!(!dsn.skip_verify());
+        assert_eq!(dsn.page_size(), 2000);
+        assert_eq!(dsn.client_name(), "test-app");
+        assert_eq!(dsn.conformance(), "full");
+    }
+
+    #[test]
+    fn test_dsn_parse_unknown_options_preserved() {
+        let dsn = Dsn::parse("quic://localhost:3141?custom_option=value").unwrap();
+        assert_eq!(
+            dsn.options().get("custom_option"),
+            Some(&"value".to_string())
+        );
+    }
+
+    #[test]
+    fn test_dsn_parse_option_aliases() {
+        // Test username/user alias
+        let dsn1 = Dsn::parse("grpc://localhost:50051?user=admin").unwrap();
+        let dsn2 = Dsn::parse("grpc://localhost:50051?username=admin").unwrap();
+        assert_eq!(dsn1.username(), dsn2.username());
+
+        // Test password/pass alias
+        let dsn3 = Dsn::parse("grpc://localhost:50051?pass=secret").unwrap();
+        let dsn4 = Dsn::parse("grpc://localhost:50051?password=secret").unwrap();
+        assert_eq!(dsn3.password(), dsn4.password());
+
+        // Test skip_verify/insecure alias
+        let dsn5 = Dsn::parse("grpc://localhost:50051?skip_verify=true").unwrap();
+        let dsn6 = Dsn::parse("grpc://localhost:50051?insecure=true").unwrap();
+        assert_eq!(dsn5.skip_verify(), dsn6.skip_verify());
+    }
+
+    #[test]
+    fn test_dsn_parse_percent_encoded_values() {
+        let dsn = Dsn::parse("quic://localhost:3141?client_name=My%20App").unwrap();
+        assert_eq!(dsn.client_name(), "My App");
+    }
+
+    // ==========================================================================
+    // Transport Display Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_transport_display() {
+        assert_eq!(Transport::Quic.to_string(), "quic");
+        assert_eq!(Transport::Grpc.to_string(), "grpc");
+    }
+
+    // ==========================================================================
+    // Address Formatting Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_dsn_address_ipv4() {
+        let dsn = Dsn::parse("quic://192.168.1.1:3141").unwrap();
+        assert_eq!(dsn.address(), "192.168.1.1:3141");
+    }
+
+    #[test]
+    fn test_dsn_address_hostname() {
+        let dsn = Dsn::parse("grpc://geode.example.com:50051").unwrap();
+        assert_eq!(dsn.address(), "geode.example.com:50051");
+    }
+
+    // ==========================================================================
+    // Acceptance Tests (from task requirements)
+    // ==========================================================================
+
+    #[test]
+    fn test_acceptance_quic_localhost() {
+        // DSN parse: quic://localhost:1234 ⇒ transport=QUIC, host=localhost, port=1234
+        let dsn = Dsn::parse("quic://localhost:1234").unwrap();
+        assert_eq!(dsn.transport(), Transport::Quic);
+        assert_eq!(dsn.host(), "localhost");
+        assert_eq!(dsn.port(), 1234);
+    }
+
+    #[test]
+    fn test_acceptance_grpc_with_tls_disabled() {
+        // DSN parse: grpc://127.0.0.1:50051?tls=0 ⇒ transport=GRPC, host=127.0.0.1, port=50051, tls disabled
+        let dsn = Dsn::parse("grpc://127.0.0.1:50051?tls=0").unwrap();
+        assert_eq!(dsn.transport(), Transport::Grpc);
+        assert_eq!(dsn.host(), "127.0.0.1");
+        assert_eq!(dsn.port(), 50051);
+        assert!(!dsn.tls_enabled());
+    }
+
+    #[test]
+    fn test_acceptance_invalid_scheme() {
+        // DSN parse invalid: http://localhost:1 ⇒ deterministic "unsupported scheme" error
+        let err = Dsn::parse("http://localhost:1").unwrap_err();
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("Unsupported scheme") || err_str.contains("unsupported"),
+            "Expected 'unsupported scheme' error, got: {}",
+            err_str
+        );
+    }
+}

@@ -337,6 +337,44 @@ impl Value {
         }
     }
 
+    /// Convert to a string representation for protobuf parameters
+    pub fn to_proto_string(&self) -> String {
+        match self.kind {
+            ValueKind::Null => String::new(),
+            ValueKind::Int => self.int_value.to_string(),
+            ValueKind::Bool => self.bool_value.to_string(),
+            ValueKind::String
+            | ValueKind::Xml
+            | ValueKind::Json
+            | ValueKind::Jsonb
+            | ValueKind::Url
+            | ValueKind::Domain
+            | ValueKind::Uuid
+            | ValueKind::Enum
+            | ValueKind::BitString => self.string_value.clone(),
+            ValueKind::Decimal => self
+                .decimal_value
+                .map(|d| d.to_string())
+                .unwrap_or_default(),
+            ValueKind::Array => serde_json::to_string(&self.to_json()).unwrap_or_default(),
+            ValueKind::Object => serde_json::to_string(&self.to_json()).unwrap_or_default(),
+            ValueKind::Bytea => {
+                if self.bytes_value.is_empty() {
+                    self.string_value.clone()
+                } else {
+                    format!("\\x{}", hex::encode(&self.bytes_value))
+                }
+            }
+            ValueKind::Date
+            | ValueKind::Time
+            | ValueKind::TimeTz
+            | ValueKind::Timestamp
+            | ValueKind::TimestampTz
+            | ValueKind::Interval => self.string_value.clone(),
+            ValueKind::Range => serde_json::to_string(&self.to_json()).unwrap_or_default(),
+        }
+    }
+
     /// Create a Value from a serde_json::Value
     pub fn from_json(json: serde_json::Value) -> Self {
         match json {

@@ -10,7 +10,7 @@ repository = "https://gitlab.com/devnw/codepros/geode/geode-client-rust"
 homepage = "https://geodedb.com"
 documentation = "https://gitlab.com/devnw/codepros/geode/geode-client-rust"
 readme = "README.md"
-keywords = ["database", "graph", "gql", "geode", "quic"]
+keywords = ["database", "graph", "gql", "geode", "quic", "grpc"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
@@ -26,7 +26,12 @@ rustls-native-certs = "0.8"  # Load system root certificates for TLS verificatio
 # Security
 secrecy = "0.10"  # Zeroize sensitive data on drop
 
-# Serialization
+# gRPC and Protobuf support
+tonic = { version = "0.12", features = ["tls", "channel"] }
+prost = "0.13"
+http = "1.0"
+
+# Serialization (used internally for Value types)
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
@@ -74,9 +79,14 @@ path = "examples/benchmark.rs"
 name = "geode_client"
 path = "src/lib.rs"
 
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"
+
 [features]
-default = ["quic"]
+default = ["quic", "grpc"]
 quic = []
+grpc = []
 integration = []  # Enable integration tests with Docker
 
 [dev-dependencies]
