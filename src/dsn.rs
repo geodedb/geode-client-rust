@@ -1,10 +1,11 @@
 //! DSN (Data Source Name) parsing for Geode connections.
 //!
+//! See geode/docs/DSN.md for the full specification.
+//!
 //! Supports the following DSN formats:
-//! - `quic://host:port?options` - QUIC transport (default)
+//! - `quic://host:port?options` - QUIC transport (recommended)
 //! - `grpc://host:port?options` - gRPC transport
-//! - `grcp://host:port?options` - Alias for gRPC (deprecated)
-//! - `host:port?options` - Legacy format, defaults to QUIC
+//! - `host:port?options` - Defaults to QUIC
 //!
 //! # Examples
 //!
@@ -65,6 +66,11 @@ pub struct Dsn {
     client_name: String,
     client_version: String,
     conformance: String,
+    ca_cert: Option<String>,
+    client_cert: Option<String>,
+    client_key: Option<String>,
+    server_name: Option<String>,
+    connect_timeout_secs: Option<u64>,
     options: HashMap<String, String>,
 }
 
@@ -82,6 +88,11 @@ impl Default for Dsn {
             client_name: "geode-rust".to_string(),
             client_version: env!("CARGO_PKG_VERSION").to_string(),
             conformance: "min".to_string(),
+            ca_cert: None,
+            client_cert: None,
+            client_key: None,
+            server_name: None,
+            connect_timeout_secs: None,
             options: HashMap::new(),
         }
     }
@@ -92,27 +103,31 @@ impl Dsn {
     ///
     /// # Supported formats
     ///
-    /// - `quic://host:port?options` - QUIC transport
+    /// - `quic://host:port?options` - QUIC transport (recommended)
     /// - `grpc://host:port?options` - gRPC transport
-    /// - `grcp://host:port?options` - Alias for gRPC (deprecated)
-    /// - `host:port?options` - Legacy format, defaults to QUIC
+    /// - `host:port?options` - Defaults to QUIC
     ///
     /// # Supported options (query parameters)
     ///
     /// - `tls` - Enable/disable TLS (0/1/true/false, default: true)
-    /// - `insecure` or `skip_verify` - Skip TLS verification (0/1/true/false)
+    /// - `insecure`, `skip_verify`, `insecure_skip_verify` - Skip TLS verification
     /// - `page_size` - Results page size (default: 1000)
     /// - `client_name` or `hello_name` - Client name
     /// - `client_version` or `hello_ver` - Client version
     /// - `conformance` - GQL conformance level
     /// - `username` or `user` - Authentication username
     /// - `password` or `pass` - Authentication password
+    /// - `ca` or `ca_cert` - Path to CA certificate
+    /// - `cert` or `client_cert` - Path to client certificate (mTLS)
+    /// - `key` or `client_key` - Path to client key (mTLS)
+    /// - `server_name` - SNI server name
+    /// - `connect_timeout` or `timeout` - Connection timeout in seconds
     ///
     /// # Errors
     ///
     /// Returns `Error::InvalidDsn` if:
     /// - DSN is empty
-    /// - Scheme is unsupported (not quic://, grpc://, grcp://, or schemeless)
+    /// - Scheme is unsupported
     /// - Host is missing
     /// - Port is invalid
     ///
@@ -136,19 +151,15 @@ impl Dsn {
             Self::parse_url(dsn, Transport::Quic)
         } else if dsn.starts_with("grpc://") {
             Self::parse_url(dsn, Transport::Grpc)
-        } else if dsn.starts_with("grcp://") {
-            // Deprecated alias for grpc
-            eprintln!("Warning: 'grcp://' scheme is deprecated, use 'grpc://' instead");
-            Self::parse_url(dsn, Transport::Grpc)
         } else if dsn.contains("://") {
-            // Some other scheme - reject it
+            // Unsupported scheme - reject it
             let scheme = dsn.split("://").next().unwrap_or("");
             Err(Error::invalid_dsn(format!(
                 "Unsupported scheme '{}'. Supported schemes: quic://, grpc://",
                 scheme
             )))
         } else {
-            // Legacy format: host:port?options (defaults to QUIC)
+            // Scheme-less format: host:port?options (defaults to QUIC)
             Self::parse_legacy(dsn)
         }
     }
@@ -298,7 +309,7 @@ impl Dsn {
                 "tls" => {
                     self.tls_enabled = parse_bool(value).unwrap_or(true);
                 }
-                "insecure" | "skip_verify" => {
+                "insecure_tls_skip_verify" | "insecure" | "skip_verify" => {
                     self.skip_verify = parse_bool(value).unwrap_or(false);
                 }
                 "page_size" => {
@@ -320,6 +331,21 @@ impl Dsn {
                 }
                 "password" | "pass" => {
                     self.password = Some(value.clone());
+                }
+                "ca" | "ca_cert" => {
+                    self.ca_cert = Some(value.clone());
+                }
+                "cert" | "client_cert" => {
+                    self.client_cert = Some(value.clone());
+                }
+                "key" | "client_key" => {
+                    self.client_key = Some(value.clone());
+                }
+                "server_name" => {
+                    self.server_name = Some(value.clone());
+                }
+                "connect_timeout" | "timeout" => {
+                    self.connect_timeout_secs = value.parse().ok();
                 }
                 _ => {
                     // Store unknown parameters for forward compatibility
@@ -388,6 +414,31 @@ impl Dsn {
     /// Get additional options.
     pub fn options(&self) -> &HashMap<String, String> {
         &self.options
+    }
+
+    /// Get the CA certificate path if specified.
+    pub fn ca_cert(&self) -> Option<&str> {
+        self.ca_cert.as_deref()
+    }
+
+    /// Get the client certificate path if specified.
+    pub fn client_cert(&self) -> Option<&str> {
+        self.client_cert.as_deref()
+    }
+
+    /// Get the client key path if specified.
+    pub fn client_key(&self) -> Option<&str> {
+        self.client_key.as_deref()
+    }
+
+    /// Get the SNI server name if specified.
+    pub fn server_name(&self) -> Option<&str> {
+        self.server_name.as_deref()
+    }
+
+    /// Get the connection timeout in seconds if specified.
+    pub fn connect_timeout_secs(&self) -> Option<u64> {
+        self.connect_timeout_secs
     }
 
     /// Get the host:port address string.
@@ -477,10 +528,14 @@ mod tests {
     }
 
     #[test]
-    fn test_dsn_parse_grcp_alias() {
-        // grcp:// is a deprecated alias for grpc://
-        let dsn = Dsn::parse("grcp://localhost:50051").unwrap();
-        assert_eq!(dsn.transport(), Transport::Grpc);
+    fn test_dsn_parse_unsupported_schemes() {
+        // grcp:// is no longer supported
+        let err = Dsn::parse("grcp://localhost:50051").unwrap_err();
+        assert!(err.to_string().contains("Unsupported scheme"));
+
+        // geode:// is no longer supported
+        let err = Dsn::parse("geode://localhost:3141").unwrap_err();
+        assert!(err.to_string().contains("Unsupported scheme"));
     }
 
     // ==========================================================================
@@ -663,6 +718,99 @@ mod tests {
     fn test_dsn_parse_percent_encoded_values() {
         let dsn = Dsn::parse("quic://localhost:3141?client_name=My%20App").unwrap();
         assert_eq!(dsn.client_name(), "My App");
+    }
+
+    #[test]
+    fn test_dsn_parse_mtls_options() {
+        let dsn = Dsn::parse(
+            "grpc://localhost:50051?ca=/path/ca.crt&cert=/path/client.crt&key=/path/client.key",
+        )
+        .unwrap();
+        assert_eq!(dsn.ca_cert(), Some("/path/ca.crt"));
+        assert_eq!(dsn.client_cert(), Some("/path/client.crt"));
+        assert_eq!(dsn.client_key(), Some("/path/client.key"));
+    }
+
+    #[test]
+    fn test_dsn_parse_mtls_options_alt_names() {
+        let dsn = Dsn::parse("grpc://localhost:50051?ca_cert=/path/ca.crt&client_cert=/path/client.crt&client_key=/path/client.key").unwrap();
+        assert_eq!(dsn.ca_cert(), Some("/path/ca.crt"));
+        assert_eq!(dsn.client_cert(), Some("/path/client.crt"));
+        assert_eq!(dsn.client_key(), Some("/path/client.key"));
+    }
+
+    #[test]
+    fn test_dsn_parse_connect_timeout() {
+        let dsn = Dsn::parse("quic://localhost:3141?connect_timeout=60").unwrap();
+        assert_eq!(dsn.connect_timeout_secs(), Some(60));
+    }
+
+    #[test]
+    fn test_dsn_parse_server_name() {
+        let dsn = Dsn::parse("quic://localhost:3141?server_name=geode.example.com").unwrap();
+        assert_eq!(dsn.server_name(), Some("geode.example.com"));
+    }
+
+    // ==========================================================================
+    // insecure_tls_skip_verify Parameter Tests (Unified DSN)
+    // ==========================================================================
+
+    #[test]
+    fn test_dsn_parse_insecure_tls_skip_verify_primary() {
+        // Primary parameter name
+        let dsn = Dsn::parse("quic://localhost:3141?insecure_tls_skip_verify=true").unwrap();
+        assert!(dsn.skip_verify());
+
+        let dsn = Dsn::parse("quic://localhost:3141?insecure_tls_skip_verify=1").unwrap();
+        assert!(dsn.skip_verify());
+
+        let dsn = Dsn::parse("quic://localhost:3141?insecure_tls_skip_verify=yes").unwrap();
+        assert!(dsn.skip_verify());
+
+        let dsn = Dsn::parse("quic://localhost:3141?insecure_tls_skip_verify=on").unwrap();
+        assert!(dsn.skip_verify());
+
+        let dsn = Dsn::parse("quic://localhost:3141?insecure_tls_skip_verify=false").unwrap();
+        assert!(!dsn.skip_verify());
+    }
+
+    #[test]
+    fn test_dsn_parse_insecure_alias() {
+        // Alias: insecure
+        let dsn = Dsn::parse("quic://localhost:3141?insecure=true").unwrap();
+        assert!(dsn.skip_verify());
+
+        let dsn = Dsn::parse("grpc://localhost:50051?insecure=1").unwrap();
+        assert!(dsn.skip_verify());
+
+        let dsn = Dsn::parse("localhost:3141?insecure=yes").unwrap();
+        assert!(dsn.skip_verify());
+    }
+
+    #[test]
+    fn test_dsn_parse_skip_verify_alias() {
+        // Alias: skip_verify
+        let dsn = Dsn::parse("quic://localhost:3141?skip_verify=true").unwrap();
+        assert!(dsn.skip_verify());
+
+        let dsn = Dsn::parse("grpc://localhost:50051?skip_verify=1").unwrap();
+        assert!(dsn.skip_verify());
+
+        let dsn = Dsn::parse("quic://localhost:3141?skip_verify=on").unwrap();
+        assert!(dsn.skip_verify());
+    }
+
+    #[test]
+    fn test_dsn_skip_verify_default_false() {
+        // Default should be false
+        let dsn = Dsn::parse("quic://localhost:3141").unwrap();
+        assert!(!dsn.skip_verify());
+
+        let dsn = Dsn::parse("grpc://localhost:50051").unwrap();
+        assert!(!dsn.skip_verify());
+
+        let dsn = Dsn::parse("localhost:3141").unwrap();
+        assert!(!dsn.skip_verify());
     }
 
     // ==========================================================================

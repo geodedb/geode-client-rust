@@ -20,7 +20,8 @@ use crate::validate;
 const GEODE_ALPN: &[u8] = b"geode/1";
 
 /// Redact password from a DSN string for safe inclusion in error messages.
-/// Handles both URL format (geode://user:pass@host) and query parameter format (?password=xxx).
+/// Handles both URL format (quic://user:pass@host) and query parameter format (?password=xxx).
+#[allow(dead_code)] // Used in tests
 fn redact_dsn(dsn: &str) -> String {
     let mut result = dsn.to_string();
 
@@ -389,7 +390,6 @@ impl Client {
     ///
     /// - `quic://host:port?options` - QUIC transport (recommended)
     /// - `grpc://host:port?options` - gRPC transport
-    /// - `grcp://host:port?options` - Alias for gRPC (deprecated)
     /// - `host:port?options` - Legacy format (defaults to QUIC)
     ///
     /// # Supported Options
@@ -872,7 +872,7 @@ impl Connection {
         username: Option<&str>,
         password: Option<&str>,
         connect_timeout_secs: u64,
-        hello_timeout_secs: u64,
+        _hello_timeout_secs: u64,
         idle_timeout_secs: u64,
     ) -> Result<Self> {
         debug!("Creating connection to {}:{}", host, port);
@@ -1020,7 +1020,7 @@ impl Connection {
             .await
             .map_err(|e| Error::connection(format!("Failed to send HELLO: {}", e)))?;
 
-// Wait for HELLO response (length-prefixed protobuf)
+        // Wait for HELLO response (length-prefixed protobuf)
         let mut length_buf = [0u8; 4];
         timeout(Duration::from_secs(5), recv.read_exact(&mut length_buf))
             .await
@@ -1037,7 +1037,7 @@ impl Connection {
 
         let hello_response = proto::decode_quic_server_message(&msg_buf)?;
 
-if let Some(ref hello_resp) = hello_response.hello {
+        if let Some(ref hello_resp) = hello_response.hello {
             if !hello_resp.success {
                 return Err(Error::connection(format!(
                     "Authentication failed: {}",
@@ -2190,7 +2190,7 @@ mod tests {
 
     #[test]
     fn test_redact_dsn_url_with_password() {
-        let dsn = "geode://admin:secret123@localhost:3141";
+        let dsn = "quic://admin:secret123@localhost:3141";
         let redacted = redact_dsn(dsn);
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("secret123"));
@@ -2200,7 +2200,7 @@ mod tests {
 
     #[test]
     fn test_redact_dsn_url_without_password() {
-        let dsn = "geode://admin@localhost:3141";
+        let dsn = "quic://admin@localhost:3141";
         let redacted = redact_dsn(dsn);
         assert!(!redacted.contains("[REDACTED]"));
         assert!(redacted.contains("admin"));
@@ -2209,7 +2209,7 @@ mod tests {
 
     #[test]
     fn test_redact_dsn_url_no_auth() {
-        let dsn = "geode://localhost:3141";
+        let dsn = "quic://localhost:3141";
         let redacted = redact_dsn(dsn);
         assert_eq!(redacted, dsn);
     }
@@ -2240,7 +2240,7 @@ mod tests {
 
     #[test]
     fn test_redact_dsn_url_with_query_and_password() {
-        let dsn = "geode://user:pass@localhost:3141?insecure=true";
+        let dsn = "quic://user:pass@localhost:3141?insecure=true";
         let redacted = redact_dsn(dsn);
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains(":pass@"));
