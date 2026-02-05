@@ -1,6 +1,6 @@
 [package]
 name = "geode-client"
-version = "0.1.1-alpha.9"
+version = "0.1.1-alpha.11"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Geode Contributors <info@codepros.org>"]
@@ -10,7 +10,7 @@ repository = "https://gitlab.com/devnw/codepros/geode/geode-client-rust"
 homepage = "https://geodedb.com"
 documentation = "https://gitlab.com/devnw/codepros/geode/geode-client-rust"
 readme = "README.md"
-keywords = ["database", "graph", "gql", "geode", "quic", "grpc"]
+keywords = ["database", "graph", "gql", "geode", "quic"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
