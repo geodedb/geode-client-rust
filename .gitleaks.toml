@@ -8,21 +8,40 @@ title = "Gitleaks Configuration"
 useDefault = true
 
 [allowlist]
-description = "Global allowlist - only exclude build artifacts and logs"
+description = "Global allowlist for false positives"
+# Path-based allowlists for build artifacts
 paths = [
   '''target''',
   '''.*\.log$''',
 ]
 
-# Allowlist specific test patterns that are known false positives
-[[rules]]
-id = "test-fixture-passwords"
-description = "Test fixtures with example/placeholder credentials"
-regex = '''(?i)(test_password|example_secret|placeholder)'''
-allowlist = { paths = ['''tests/.*'''] }
+# Regex-based allowlists for known false positives
+# These patterns match documentation examples and test fixtures
+regexes = [
+  # Test fixture credential names in documentation/code
+  '''(?i)(test_password|example_secret|placeholder)''',
+  # DSN example strings with test credentials
+  '''(quic|grpc|geode)://[^:]+:(secret|password)@(localhost|127\.0\.0\.1|::1)''',
+  # Query parameter examples with test credentials
+  '''(user|username)=(admin|testuser)&(pass|password)=secret''',
+  # Rust struct field type annotations (not values)
+  '''password:\s*(String|&str|Option<String>|Option<&str>)''',
+  # Default test password constant
+  '''GeodeTestPassword123!''',
+  # Example credentials in code comments
+  '''//.*(?:password|secret|credential).*example''',
+]
 
-[[rules]]
-id = "documentation-examples"
-description = "Documentation examples showing DSN format"
-regex = '''geode://[^:]+:secret@'''
-allowlist = { paths = ['''.*\.md$''', '''examples/.*'''] }
+# Stop words to reduce noise
+stopwords = [
+  "EXAMPLE",
+  "example",
+  "test",
+  "TEST",
+  "mock",
+  "MOCK",
+  "sample",
+  "SAMPLE",
+  "placeholder",
+  "PLACEHOLDER",
+]
