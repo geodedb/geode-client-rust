@@ -120,16 +120,14 @@ security:cargo-audit:
 
 # -----------------------------------------------------------------------------
 # Integration Tests (requires Geode server)
-# NOTE: This job requires the Geode Docker image to be published.
-# Until the image is available, this job will fail but won't block the pipeline.
-# To enable: publish geode image to registry.gitlab.com/devnw/codepros/geode/geode
+# NOTE: This job requires the Geode Docker image to be available.
 # -----------------------------------------------------------------------------
 
 test:integration:
   stage: test
   image: rust:latest
   services:
-    - name: $CI_REGISTRY/devnw/codepros/geode/geode:latest
+    - name: geodedb/geode:latest
       alias: geode
       command: ["serve", "--listen", "0.0.0.0:3141", "--log-level", "info"]
   variables:
