@@ -27,12 +27,23 @@ fn main() {
         println!("cargo:rustc-env=LDFLAGS={}", gcc_lib);
     }
 
-    // Generate Rust types and gRPC service client from geode.proto using
-    // tonic-build (which internally uses prost-build for message types).
-    tonic_build::configure()
-        .build_server(false) // Client library only needs the client stub
-        .build_client(true)
-        .out_dir("src/generated")
-        .compile_protos(&["proto/geode.proto"], &["proto/"])
-        .expect("Failed to compile geode.proto");
+    // Proto code generation is opt-in via GENERATE_PROTO=1 environment variable.
+    // The generated code is checked into src/generated/geode.rs and used directly
+    // by default. This avoids requiring protoc in CI or for regular development.
+    //
+    // To regenerate after changing proto/geode.proto:
+    //   GENERATE_PROTO=1 cargo build
+    if std::env::var("GENERATE_PROTO").is_ok_and(|v| v == "1") {
+        tonic_build::configure()
+            .build_server(false) // Client library only needs the client stub
+            .build_client(true)
+            .out_dir("src/generated")
+            .compile_protos(&["proto/geode.proto"], &["proto/"])
+            .expect("Failed to compile geode.proto");
+
+        // Run rustfmt on the generated file so it matches project formatting.
+        let _ = std::process::Command::new("rustfmt")
+            .arg("src/generated/geode.rs")
+            .status();
+    }
 }
