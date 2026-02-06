@@ -131,7 +131,7 @@ test-integration:
 test-integration-docker:
 	@echo "Running integration tests with Docker..."
 	@echo ""
-	@echo "Using Docker image: registry.gitlab.com/devnw/geode/geode:latest"
+	@echo "Using Docker image: geodedb/geode:latest"
 	@echo ""
 	GEODE_USE_DOCKER=true $(CARGO) test --features integration $(CARGO_FLAGS) -- --test-threads=1
 	@echo "✓ Docker integration tests complete (36 tests)"

@@ -32,9 +32,9 @@ const DEFAULT_GEODE_HOST: &str = "127.0.0.1";
 const DEFAULT_GEODE_PORT: u16 = 3141;
 // Port exposed by Docker image for QUIC (UDP)
 const DOCKER_GEODE_PORT: u16 = 3141;
-// Default to the registry image (available at registry.gitlab.com/devnw/geode/geode)
+// Default to the registry image (available at geodedb/geode)
 // Or build locally with: cd ../geode && docker build -t geode:local .
-const DEFAULT_GEODE_IMAGE: &str = "registry.gitlab.com/devnw/geode/geode";
+const DEFAULT_GEODE_IMAGE: &str = "geodedb/geode";
 const DEFAULT_GEODE_TAG: &str = "latest";
 
 /// Shared container state (only used in Docker mode)
@@ -156,7 +156,7 @@ async fn get_server_info() -> (String, u16) {
                 "Failed to start Geode container with image {}:{}.\n\
                 Error: {}\n\n\
                 To fix this, either:\n\
-                1. Pull the image: docker pull registry.gitlab.com/devnw/geode/geode:latest\n\
+                1. Pull the image: docker pull geodedb/geode:latest\n\
                 2. Or build locally: cd ../geode && docker build -t geode:local . && use GEODE_IMAGE=geode:local\n\
                 3. Or use a local server instead: unset GEODE_USE_DOCKER",
                 image, tag, e
