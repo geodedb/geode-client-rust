@@ -1,5 +1,5 @@
 // Build script for geode-client
-// Configures build environment
+// Generates Rust code from geode.proto using prost-build and tonic-build.
 
 fn main() {
     // Get glibc paths from environment for Nix compatibility
@@ -27,10 +27,12 @@ fn main() {
         println!("cargo:rustc-env=LDFLAGS={}", gcc_lib);
     }
 
-    // Note: Protobuf types are manually implemented in src/proto.rs
-    // to avoid requiring protoc at build time. This follows the pattern
-    // of many Rust libraries that want to be easy to build.
-    //
-    // The manual implementation is compatible with the geode.proto schema
-    // and supports both QUIC (length-prefixed protobuf) and gRPC transports.
+    // Generate Rust types and gRPC service client from geode.proto using
+    // tonic-build (which internally uses prost-build for message types).
+    tonic_build::configure()
+        .build_server(false) // Client library only needs the client stub
+        .build_client(true)
+        .out_dir("src/generated")
+        .compile_protos(&["proto/geode.proto"], &["proto/"])
+        .expect("Failed to compile geode.proto");
 }

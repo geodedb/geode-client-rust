@@ -339,29 +339,40 @@ impl Value {
 
     /// Convert to a proto::Value for protobuf parameter encoding
     pub fn to_proto_value(&self) -> crate::proto::Value {
+        use crate::proto::{self, value};
         match self.kind {
-            ValueKind::Null => crate::proto::Value {
-                null_val: true,
-                ..Default::default()
+            ValueKind::Null => proto::Value {
+                kind: Some(value::Kind::NullVal(proto::NullValue {})),
             },
-            ValueKind::Int => crate::proto::Value {
-                int_val: Some(self.int_value),
-                ..Default::default()
+            ValueKind::Int => proto::Value {
+                kind: Some(value::Kind::IntVal(proto::IntValue {
+                    value: self.int_value,
+                    kind: 0,
+                })),
             },
-            ValueKind::Bool => crate::proto::Value {
-                bool_val: Some(self.bool_value),
-                ..Default::default()
+            ValueKind::Bool => proto::Value {
+                kind: Some(value::Kind::BoolVal(self.bool_value)),
             },
-            ValueKind::Decimal => crate::proto::Value {
-                double_val: self.decimal_value.and_then(|d| {
-                    use std::str::FromStr;
-                    f64::from_str(&d.to_string()).ok()
-                }),
-                ..Default::default()
-            },
-            _ => crate::proto::Value {
-                string_val: Some(self.to_proto_string()),
-                ..Default::default()
+            ValueKind::Decimal => {
+                let double_val = self
+                    .decimal_value
+                    .and_then(|d| {
+                        use std::str::FromStr;
+                        f64::from_str(&d.to_string()).ok()
+                    })
+                    .unwrap_or(0.0);
+                proto::Value {
+                    kind: Some(value::Kind::DoubleVal(proto::DoubleValue {
+                        value: double_val,
+                        kind: 0,
+                    })),
+                }
+            }
+            _ => proto::Value {
+                kind: Some(value::Kind::StringVal(proto::StringValue {
+                    value: self.to_proto_string(),
+                    kind: 0,
+                })),
             },
         }
     }

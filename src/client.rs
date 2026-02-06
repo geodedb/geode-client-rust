@@ -1010,11 +1010,13 @@ impl Connection {
         let hello_req = proto::HelloRequest {
             username: username.unwrap_or("").to_string(),
             password: password.unwrap_or("").to_string(),
-            tenant_id: String::new(),
+            tenant_id: None,
+            client_name: String::new(),
+            client_version: String::new(),
+            wanted_conformance: String::new(),
         };
         let msg = proto::QuicClientMessage {
-            hello: Some(hello_req),
-            ..Default::default()
+            msg: Some(proto::quic_client_message::Msg::Hello(hello_req)),
         };
         let data = proto::encode_with_length_prefix(&msg);
 
@@ -1039,16 +1041,19 @@ impl Connection {
 
         let hello_response = proto::decode_quic_server_message(&msg_buf)?;
 
-        let session_id = if let Some(ref hello_resp) = hello_response.hello {
-            if !hello_resp.success {
-                return Err(Error::connection(format!(
-                    "Authentication failed: {}",
-                    hello_resp.error_message
-                )));
+        let session_id = match hello_response.msg {
+            Some(proto::quic_server_message::Msg::Hello(ref hello_resp)) => {
+                if !hello_resp.success {
+                    return Err(Error::connection(format!(
+                        "Authentication failed: {}",
+                        hello_resp.error_message
+                    )));
+                }
+                hello_resp.session_id.clone()
             }
-            hello_resp.session_id.clone()
-        } else {
-            return Err(Error::connection("Expected HELLO response"));
+            _ => {
+                return Err(Error::connection("Expected HELLO response"));
+            }
         };
 
         debug!("HELLO handshake complete, session_id={}", session_id);
@@ -1150,22 +1155,86 @@ impl Connection {
 
     /// Convert a protobuf Value to our Value type (static version).
     fn convert_proto_value_static(proto_val: &proto::Value) -> Value {
-        if proto_val.null_val {
-            return Value::null();
+        match &proto_val.kind {
+            Some(proto::value::Kind::NullVal(_)) => Value::null(),
+            Some(proto::value::Kind::StringVal(s)) => Value::string(s.value.clone()),
+            Some(proto::value::Kind::IntVal(i)) => Value::int(i.value),
+            Some(proto::value::Kind::DoubleVal(d)) => {
+                Value::decimal(rust_decimal::Decimal::from_f64_retain(d.value).unwrap_or_default())
+            }
+            Some(proto::value::Kind::BoolVal(b)) => Value::bool(*b),
+            Some(proto::value::Kind::ListVal(list)) => {
+                let values: Vec<Value> = list
+                    .values
+                    .iter()
+                    .map(Self::convert_proto_value_static)
+                    .collect();
+                Value::array(values)
+            }
+            Some(proto::value::Kind::MapVal(map)) => {
+                let mut obj = std::collections::HashMap::new();
+                for entry in &map.entries {
+                    let val = entry
+                        .value
+                        .as_ref()
+                        .map(Self::convert_proto_value_static)
+                        .unwrap_or_else(Value::null);
+                    obj.insert(entry.key.clone(), val);
+                }
+                Value::object(obj)
+            }
+            Some(proto::value::Kind::NodeVal(node)) => {
+                let mut obj = std::collections::HashMap::new();
+                obj.insert("id".to_string(), Value::int(node.id as i64));
+                let labels: Vec<Value> = node
+                    .labels
+                    .iter()
+                    .map(|l| Value::string(l.clone()))
+                    .collect();
+                obj.insert("labels".to_string(), Value::array(labels));
+                let mut props = std::collections::HashMap::new();
+                for entry in &node.properties {
+                    let val = entry
+                        .value
+                        .as_ref()
+                        .map(Self::convert_proto_value_static)
+                        .unwrap_or_else(Value::null);
+                    props.insert(entry.key.clone(), val);
+                }
+                obj.insert("properties".to_string(), Value::object(props));
+                Value::object(obj)
+            }
+            Some(proto::value::Kind::EdgeVal(edge)) => {
+                let mut obj = std::collections::HashMap::new();
+                obj.insert("id".to_string(), Value::int(edge.id as i64));
+                obj.insert("from_id".to_string(), Value::int(edge.from_id as i64));
+                obj.insert("to_id".to_string(), Value::int(edge.to_id as i64));
+                obj.insert("label".to_string(), Value::string(edge.label.clone()));
+                let mut props = std::collections::HashMap::new();
+                for entry in &edge.properties {
+                    let val = entry
+                        .value
+                        .as_ref()
+                        .map(Self::convert_proto_value_static)
+                        .unwrap_or_else(Value::null);
+                    props.insert(entry.key.clone(), val);
+                }
+                obj.insert("properties".to_string(), Value::object(props));
+                Value::object(obj)
+            }
+            Some(proto::value::Kind::DecimalVal(d)) => {
+                // Try to parse the decimal from coeff + scale
+                if let Ok(dec) = d.coeff.parse::<rust_decimal::Decimal>() {
+                    Value::decimal(dec)
+                } else {
+                    Value::string(d.orig_repr.clone())
+                }
+            }
+            Some(proto::value::Kind::BytesVal(b)) => {
+                Value::string(format!("\\x{}", hex::encode(&b.value)))
+            }
+            _ => Value::null(),
         }
-        if let Some(ref s) = proto_val.string_val {
-            return Value::string(s.clone());
-        }
-        if let Some(i) = proto_val.int_val {
-            return Value::int(i);
-        }
-        if let Some(d) = proto_val.double_val {
-            return Value::decimal(rust_decimal::Decimal::from_f64_retain(d).unwrap_or_default());
-        }
-        if let Some(b) = proto_val.bool_val {
-            return Value::bool(b);
-        }
-        Value::null()
     }
 
     /// Send BEGIN transaction command over QUIC.
@@ -1175,16 +1244,17 @@ impl Connection {
         session_id: &str,
     ) -> Result<()> {
         let msg = proto::QuicClientMessage {
-            begin: Some(proto::BeginRequest {
-                session_id: session_id.to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
+            msg: Some(proto::quic_client_message::Msg::Begin(
+                proto::BeginRequest {
+                    session_id: session_id.to_string(),
+                    ..Default::default()
+                },
+            )),
         };
         Self::send_proto_quic(send, &msg).await?;
 
         let resp = Self::read_proto_quic(recv, 5).await?;
-        if resp.begin.is_none() {
+        if !matches!(resp.msg, Some(proto::quic_server_message::Msg::Begin(_))) {
             return Err(Error::protocol("Expected BEGIN response"));
         }
         Ok(())
@@ -1197,15 +1267,16 @@ impl Connection {
         session_id: &str,
     ) -> Result<()> {
         let msg = proto::QuicClientMessage {
-            commit: Some(proto::CommitRequest {
-                session_id: session_id.to_string(),
-            }),
-            ..Default::default()
+            msg: Some(proto::quic_client_message::Msg::Commit(
+                proto::CommitRequest {
+                    session_id: session_id.to_string(),
+                },
+            )),
         };
         Self::send_proto_quic(send, &msg).await?;
 
         let resp = Self::read_proto_quic(recv, 5).await?;
-        if resp.commit.is_none() {
+        if !matches!(resp.msg, Some(proto::quic_server_message::Msg::Commit(_))) {
             return Err(Error::protocol("Expected COMMIT response"));
         }
         Ok(())
@@ -1218,15 +1289,16 @@ impl Connection {
         session_id: &str,
     ) -> Result<()> {
         let msg = proto::QuicClientMessage {
-            rollback: Some(proto::RollbackRequest {
-                session_id: session_id.to_string(),
-            }),
-            ..Default::default()
+            msg: Some(proto::quic_client_message::Msg::Rollback(
+                proto::RollbackRequest {
+                    session_id: session_id.to_string(),
+                },
+            )),
         };
         Self::send_proto_quic(send, &msg).await?;
 
         let resp = Self::read_proto_quic(recv, 5).await?;
-        if resp.rollback.is_none() {
+        if !matches!(resp.msg, Some(proto::quic_server_message::Msg::Rollback(_))) {
             return Err(Error::protocol("Expected ROLLBACK response"));
         }
         Ok(())
@@ -1329,21 +1401,23 @@ impl Connection {
         params: &HashMap<String, Value>,
         session_id: &str,
     ) -> Result<(Page, Option<String>)> {
-        // Convert types::Value to proto::Value
-        let params_proto: HashMap<String, proto::Value> = params
+        // Convert types::Value to proto::Param entries
+        let params_proto: Vec<proto::Param> = params
             .iter()
-            .map(|(k, v)| (k.clone(), v.to_proto_value()))
+            .map(|(k, v)| proto::Param {
+                name: k.clone(),
+                value: Some(v.to_proto_value()),
+            })
             .collect();
 
         // Send Execute request via protobuf
         let exec_req = proto::ExecuteRequest {
             session_id: session_id.to_string(),
             query: gql.to_string(),
-            parameters: params_proto,
+            params: params_proto,
         };
         let msg = proto::QuicClientMessage {
-            execute: Some(exec_req),
-            ..Default::default()
+            msg: Some(proto::quic_client_message::Msg::Execute(exec_req)),
         };
         Self::send_proto_quic(send, &msg)
             .await
@@ -1352,12 +1426,13 @@ impl Connection {
         // Read first response (should be schema or error)
         let resp = Self::read_proto_quic(recv, 10).await?;
 
-        let exec_resp = resp
-            .execute
-            .ok_or_else(|| Error::protocol("Expected Execute response"))?;
+        let exec_resp = match resp.msg {
+            Some(proto::quic_server_message::Msg::Execute(e)) => e,
+            _ => return Err(Error::protocol("Expected Execute response")),
+        };
 
-        // Check for error
-        if let Some(ref err) = exec_resp.error {
+        // Check for error in payload
+        if let Some(proto::execution_response::Payload::Error(ref err)) = exec_resp.payload {
             // Drain any follow-up messages (e.g., data page) the server may send after error
             let _ = Self::try_read_proto_quic(recv).await;
             return Err(Error::Query {
@@ -1366,41 +1441,43 @@ impl Connection {
             });
         }
 
-        // Parse columns from schema
-        let columns: Vec<Column> = exec_resp
-            .schema
-            .as_ref()
-            .map(|s| {
-                s.columns
-                    .iter()
-                    .map(|c| Column {
-                        name: c.name.clone(),
-                        col_type: c.col_type.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Parse columns from schema payload
+        let columns: Vec<Column> = match exec_resp.payload {
+            Some(proto::execution_response::Payload::Schema(ref s)) => s
+                .columns
+                .iter()
+                .map(|c| Column {
+                    name: c.name.clone(),
+                    col_type: c.r#type.clone(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
 
         trace!("Schema columns: {:?}", columns);
 
         // Check for inline data page
         if let Some(inline_resp) = Self::try_read_proto_quic(recv).await? {
-            if let Some(inline_exec) = inline_resp.execute {
-                if let Some(ref err) = inline_exec.error {
+            if let Some(proto::quic_server_message::Msg::Execute(inline_exec)) = inline_resp.msg {
+                if let Some(proto::execution_response::Payload::Error(ref err)) =
+                    inline_exec.payload
+                {
                     return Err(Error::Query {
                         code: err.code.clone(),
                         message: err.message.clone(),
                     });
                 }
 
-                if let Some(ref page_data) = inline_exec.page {
+                if let Some(proto::execution_response::Payload::Page(ref page_data)) =
+                    inline_exec.payload
+                {
                     let rows = Self::parse_proto_rows_static(&page_data.rows, &columns)?;
                     let page = Page {
                         columns,
                         rows,
-                        ordered: false,
-                        order_keys: Vec::new(),
-                        final_page: page_data.last_page,
+                        ordered: page_data.ordered,
+                        order_keys: page_data.order_keys.clone(),
+                        final_page: page_data.r#final,
                     };
                     return Ok((page, None));
                 }
@@ -1418,36 +1495,37 @@ impl Connection {
         }
 
         // Check if we got a page in the first response
-        if let Some(ref page_data) = exec_resp.page {
+        if let Some(proto::execution_response::Payload::Page(ref page_data)) = exec_resp.payload {
             let rows = Self::parse_proto_rows_static(&page_data.rows, &columns)?;
             let page = Page {
                 columns,
                 rows,
-                ordered: false,
-                order_keys: Vec::new(),
-                final_page: page_data.last_page,
+                ordered: page_data.ordered,
+                order_keys: page_data.order_keys.clone(),
+                final_page: page_data.r#final,
             };
             return Ok((page, None));
         }
 
         // Read next response for data page
         let resp = Self::read_proto_quic(recv, 30).await?;
-        if let Some(exec_resp) = resp.execute {
-            if let Some(ref err) = exec_resp.error {
+        if let Some(proto::quic_server_message::Msg::Execute(exec_resp)) = resp.msg {
+            if let Some(proto::execution_response::Payload::Error(ref err)) = exec_resp.payload {
                 return Err(Error::Query {
                     code: err.code.clone(),
                     message: err.message.clone(),
                 });
             }
 
-            if let Some(ref page_data) = exec_resp.page {
+            if let Some(proto::execution_response::Payload::Page(ref page_data)) = exec_resp.payload
+            {
                 let rows = Self::parse_proto_rows_static(&page_data.rows, &columns)?;
                 let page = Page {
                     columns,
                     rows,
-                    ordered: false,
-                    order_keys: Vec::new(),
-                    final_page: page_data.last_page,
+                    ordered: page_data.ordered,
+                    order_keys: page_data.order_keys.clone(),
+                    final_page: page_data.r#final,
                 };
                 return Ok((page, None));
             }
