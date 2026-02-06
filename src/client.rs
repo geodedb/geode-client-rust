@@ -721,6 +721,8 @@ enum ConnectionKind {
         buffer: Vec<u8>,
         /// Reserved for request ID tracking
         next_request_id: u64,
+        /// Session ID from HELLO handshake
+        session_id: String,
     },
     /// gRPC transport connection
     #[cfg(feature = "grpc")]
@@ -1037,18 +1039,19 @@ impl Connection {
 
         let hello_response = proto::decode_quic_server_message(&msg_buf)?;
 
-        if let Some(ref hello_resp) = hello_response.hello {
+        let session_id = if let Some(ref hello_resp) = hello_response.hello {
             if !hello_resp.success {
                 return Err(Error::connection(format!(
                     "Authentication failed: {}",
                     hello_resp.error_message
                 )));
             }
+            hello_resp.session_id.clone()
         } else {
             return Err(Error::connection("Expected HELLO response"));
-        }
+        };
 
-        debug!("HELLO handshake complete");
+        debug!("HELLO handshake complete, session_id={}", session_id);
 
         Ok(Self {
             kind: ConnectionKind::Quic {
@@ -1057,6 +1060,7 @@ impl Connection {
                 recv,
                 buffer: Vec::new(),
                 next_request_id: 1,
+                session_id,
             },
             page_size,
         })
@@ -1168,9 +1172,13 @@ impl Connection {
     async fn send_begin_quic(
         send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
+        session_id: &str,
     ) -> Result<()> {
         let msg = proto::QuicClientMessage {
-            begin: Some(proto::BeginRequest::default()),
+            begin: Some(proto::BeginRequest {
+                session_id: session_id.to_string(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         Self::send_proto_quic(send, &msg).await?;
@@ -1186,9 +1194,12 @@ impl Connection {
     async fn send_commit_quic(
         send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
+        session_id: &str,
     ) -> Result<()> {
         let msg = proto::QuicClientMessage {
-            commit: Some(proto::CommitRequest),
+            commit: Some(proto::CommitRequest {
+                session_id: session_id.to_string(),
+            }),
             ..Default::default()
         };
         Self::send_proto_quic(send, &msg).await?;
@@ -1204,9 +1215,12 @@ impl Connection {
     async fn send_rollback_quic(
         send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
+        session_id: &str,
     ) -> Result<()> {
         let msg = proto::QuicClientMessage {
-            rollback: Some(proto::RollbackRequest),
+            rollback: Some(proto::RollbackRequest {
+                session_id: session_id.to_string(),
+            }),
             ..Default::default()
         };
         Self::send_proto_quic(send, &msg).await?;
@@ -1296,9 +1310,12 @@ impl Connection {
         params: &HashMap<String, Value>,
     ) -> Result<(Page, Option<String>)> {
         match &mut self.kind {
-            ConnectionKind::Quic { send, recv, .. } => {
-                Self::query_with_params_quic(send, recv, gql, params).await
-            }
+            ConnectionKind::Quic {
+                send,
+                recv,
+                session_id,
+                ..
+            } => Self::query_with_params_quic(send, recv, gql, params, session_id).await,
             #[cfg(feature = "grpc")]
             ConnectionKind::Grpc { client } => client.query_with_params(gql, params).await,
         }
@@ -1310,16 +1327,17 @@ impl Connection {
         recv: &mut quinn::RecvStream,
         gql: &str,
         params: &HashMap<String, Value>,
+        session_id: &str,
     ) -> Result<(Page, Option<String>)> {
-        // Convert params to string map for protobuf
-        let params_proto: HashMap<String, String> = params
+        // Convert types::Value to proto::Value
+        let params_proto: HashMap<String, proto::Value> = params
             .iter()
-            .map(|(k, v)| (k.clone(), v.to_proto_string()))
+            .map(|(k, v)| (k.clone(), v.to_proto_value()))
             .collect();
 
         // Send Execute request via protobuf
         let exec_req = proto::ExecuteRequest {
-            session_id: String::new(),
+            session_id: session_id.to_string(),
             query: gql.to_string(),
             parameters: params_proto,
         };
@@ -1340,6 +1358,8 @@ impl Connection {
 
         // Check for error
         if let Some(ref err) = exec_resp.error {
+            // Drain any follow-up messages (e.g., data page) the server may send after error
+            let _ = Self::try_read_proto_quic(recv).await;
             return Err(Error::Query {
                 code: err.code.clone(),
                 message: err.message.clone(),
@@ -1501,7 +1521,12 @@ impl Connection {
     /// ```
     pub async fn begin(&mut self) -> Result<()> {
         match &mut self.kind {
-            ConnectionKind::Quic { send, recv, .. } => Self::send_begin_quic(send, recv).await,
+            ConnectionKind::Quic {
+                send,
+                recv,
+                session_id,
+                ..
+            } => Self::send_begin_quic(send, recv, session_id).await,
             #[cfg(feature = "grpc")]
             ConnectionKind::Grpc { client } => client.begin().await,
         }
@@ -1531,7 +1556,12 @@ impl Connection {
     /// ```
     pub async fn commit(&mut self) -> Result<()> {
         match &mut self.kind {
-            ConnectionKind::Quic { send, recv, .. } => Self::send_commit_quic(send, recv).await,
+            ConnectionKind::Quic {
+                send,
+                recv,
+                session_id,
+                ..
+            } => Self::send_commit_quic(send, recv, session_id).await,
             #[cfg(feature = "grpc")]
             ConnectionKind::Grpc { client } => client.commit().await,
         }
@@ -1562,7 +1592,12 @@ impl Connection {
     /// ```
     pub async fn rollback(&mut self) -> Result<()> {
         match &mut self.kind {
-            ConnectionKind::Quic { send, recv, .. } => Self::send_rollback_quic(send, recv).await,
+            ConnectionKind::Quic {
+                send,
+                recv,
+                session_id,
+                ..
+            } => Self::send_rollback_quic(send, recv, session_id).await,
             #[cfg(feature = "grpc")]
             ConnectionKind::Grpc { client } => client.rollback().await,
         }

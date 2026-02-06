@@ -42,7 +42,7 @@ pub struct HelloResponse {
 pub struct ExecuteRequest {
     pub session_id: String,
     pub query: String,
-    pub parameters: HashMap<String, String>,
+    pub parameters: HashMap<String, Value>,
 }
 
 /// Column definition in result schema.
@@ -126,6 +126,7 @@ pub struct PingResponse {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BeginRequest {
     pub read_only: bool,
+    pub session_id: String,
 }
 
 /// Confirms transaction start.
@@ -137,7 +138,9 @@ pub struct BeginResponse {
 
 /// Commit a transaction.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct CommitRequest;
+pub struct CommitRequest {
+    pub session_id: String,
+}
 
 /// Confirms commit.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -147,7 +150,9 @@ pub struct CommitResponse {
 
 /// Roll back a transaction.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct RollbackRequest;
+pub struct RollbackRequest {
+    pub session_id: String,
+}
 
 /// Confirms rollback.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -265,14 +270,44 @@ fn encode_hello_request(req: &HelloRequest) -> Vec<u8> {
     result
 }
 
+fn encode_value(val: &Value) -> Vec<u8> {
+    let mut result = Vec::new();
+    if val.null_val {
+        // NullValue = field 1, empty submessage
+        result.extend(encode_submessage(1, &[]));
+    } else if let Some(i) = val.int_val {
+        // IntValue = field 2, submessage with value at field 1
+        let mut inner = Vec::new();
+        inner.extend(encode_int64(1, i));
+        result.extend(encode_submessage(2, &inner));
+    } else if let Some(d) = val.double_val {
+        // DoubleValue = field 3, submessage with value at field 1
+        let mut inner = Vec::new();
+        inner.push(((1 << 3) | WIRE_FIXED64) as u8);
+        inner.extend(&d.to_le_bytes());
+        result.extend(encode_submessage(3, &inner));
+    } else if let Some(b) = val.bool_val {
+        // bool_val = field 4, scalar bool (varint)
+        result.push(((4 << 3) | WIRE_VARINT) as u8);
+        result.push(if b { 1 } else { 0 });
+    } else if let Some(ref s) = val.string_val {
+        // StringValue = field 5, submessage with value at field 1
+        let mut inner = Vec::new();
+        inner.extend(encode_string(1, s));
+        result.extend(encode_submessage(5, &inner));
+    }
+    result
+}
+
 fn encode_execute_request(req: &ExecuteRequest) -> Vec<u8> {
     let mut result = Vec::new();
     result.extend(encode_string(1, &req.session_id));
     result.extend(encode_string(2, &req.query));
-    // Encode map as repeated key-value pairs
+    // Encode params as repeated Param submessages (name=string, value=Value)
     for (k, v) in &req.parameters {
         let mut entry = encode_string(1, k);
-        entry.extend(encode_string(2, v));
+        let value_data = encode_value(v);
+        entry.extend(encode_submessage(2, &value_data));
         result.extend(encode_submessage(3, &entry));
     }
     result
@@ -285,15 +320,26 @@ fn encode_ping_request(_req: &PingRequest) -> Vec<u8> {
 fn encode_begin_request(req: &BeginRequest) -> Vec<u8> {
     let mut result = Vec::new();
     result.extend(encode_bool(1, req.read_only));
+    if !req.session_id.is_empty() {
+        result.extend(encode_string(2, &req.session_id));
+    }
     result
 }
 
-fn encode_commit_request(_req: &CommitRequest) -> Vec<u8> {
-    Vec::new()
+fn encode_commit_request(req: &CommitRequest) -> Vec<u8> {
+    let mut result = Vec::new();
+    if !req.session_id.is_empty() {
+        result.extend(encode_string(1, &req.session_id));
+    }
+    result
 }
 
-fn encode_rollback_request(_req: &RollbackRequest) -> Vec<u8> {
-    Vec::new()
+fn encode_rollback_request(req: &RollbackRequest) -> Vec<u8> {
+    let mut result = Vec::new();
+    if !req.session_id.is_empty() {
+        result.extend(encode_string(1, &req.session_id));
+    }
+    result
 }
 
 /// Encode a QuicClientMessage to protobuf bytes.
@@ -306,16 +352,16 @@ pub fn encode_quic_client_message(msg: &QuicClientMessage) -> Vec<u8> {
         result.extend(encode_submessage(2, &encode_execute_request(execute)));
     }
     if let Some(ref ping) = msg.ping {
-        result.extend(encode_submessage(3, &encode_ping_request(ping)));
+        result.extend(encode_submessage(4, &encode_ping_request(ping)));
     }
     if let Some(ref begin) = msg.begin {
-        result.extend(encode_submessage(6, &encode_begin_request(begin)));
+        result.extend(encode_submessage(7, &encode_begin_request(begin)));
     }
     if let Some(ref commit) = msg.commit {
-        result.extend(encode_submessage(7, &encode_commit_request(commit)));
+        result.extend(encode_submessage(8, &encode_commit_request(commit)));
     }
     if let Some(ref rollback) = msg.rollback {
-        result.extend(encode_submessage(8, &encode_rollback_request(rollback)));
+        result.extend(encode_submessage(9, &encode_rollback_request(rollback)));
     }
     result
 }
@@ -471,15 +517,71 @@ fn decode_value(data: &[u8]) -> Result<Value> {
     while pos < data.len() {
         let (field_num, wire_type) = decode_tag(data, &mut pos)?;
         match (field_num, wire_type) {
-            (1, WIRE_BYTES) => val.string_val = Some(decode_string(data, &mut pos)?),
-            (2, WIRE_VARINT) => val.int_val = Some(decode_int64(data, &mut pos)?),
-            (3, WIRE_FIXED64) => val.double_val = Some(decode_double(data, &mut pos)?),
+            // field 1 = NullValue (submessage, empty)
+            (1, WIRE_BYTES) => {
+                let _null_data = decode_bytes_field(data, &mut pos)?;
+                val.null_val = true;
+            }
+            // field 2 = IntValue submessage { int64 value = 1; }
+            (2, WIRE_BYTES) => {
+                let int_data = decode_bytes_field(data, &mut pos)?;
+                val.int_val = Some(decode_int_value(&int_data)?);
+            }
+            // field 3 = DoubleValue submessage { double value = 1; }
+            (3, WIRE_BYTES) => {
+                let dbl_data = decode_bytes_field(data, &mut pos)?;
+                val.double_val = Some(decode_double_value(&dbl_data)?);
+            }
+            // field 4 = bool_val (scalar bool in server schema)
             (4, WIRE_VARINT) => val.bool_val = Some(decode_bool(data, &mut pos)?),
-            (5, WIRE_VARINT) => val.null_val = decode_bool(data, &mut pos)?,
+            // field 5 = StringValue submessage { string value = 1; }
+            (5, WIRE_BYTES) => {
+                let str_data = decode_bytes_field(data, &mut pos)?;
+                val.string_val = Some(decode_string_value(&str_data)?);
+            }
             _ => skip_field(data, &mut pos, wire_type)?,
         }
     }
     Ok(val)
+}
+
+fn decode_int_value(data: &[u8]) -> Result<i64> {
+    let mut value: i64 = 0;
+    let mut pos = 0;
+    while pos < data.len() {
+        let (field_num, wire_type) = decode_tag(data, &mut pos)?;
+        match (field_num, wire_type) {
+            (1, WIRE_VARINT) => value = decode_int64(data, &mut pos)?,
+            _ => skip_field(data, &mut pos, wire_type)?,
+        }
+    }
+    Ok(value)
+}
+
+fn decode_double_value(data: &[u8]) -> Result<f64> {
+    let mut value: f64 = 0.0;
+    let mut pos = 0;
+    while pos < data.len() {
+        let (field_num, wire_type) = decode_tag(data, &mut pos)?;
+        match (field_num, wire_type) {
+            (1, WIRE_FIXED64) => value = decode_double(data, &mut pos)?,
+            _ => skip_field(data, &mut pos, wire_type)?,
+        }
+    }
+    Ok(value)
+}
+
+fn decode_string_value(data: &[u8]) -> Result<String> {
+    let mut value = String::new();
+    let mut pos = 0;
+    while pos < data.len() {
+        let (field_num, wire_type) = decode_tag(data, &mut pos)?;
+        match (field_num, wire_type) {
+            (1, WIRE_BYTES) => value = decode_string(data, &mut pos)?,
+            _ => skip_field(data, &mut pos, wire_type)?,
+        }
+    }
+    Ok(value)
 }
 
 fn decode_row(data: &[u8]) -> Result<Row> {
@@ -552,23 +654,32 @@ fn decode_execution_response(data: &[u8]) -> Result<ExecutionResponse> {
     while pos < data.len() {
         let (field_num, wire_type) = decode_tag(data, &mut pos)?;
         match (field_num, wire_type) {
+            // field 1 = Status (skip for now, not needed by client)
             (1, WIRE_BYTES) => {
+                let _status_data = decode_bytes_field(data, &mut pos)?;
+            }
+            // field 2 = SchemaDefinition (oneof payload)
+            (2, WIRE_BYTES) => {
                 let schema_data = decode_bytes_field(data, &mut pos)?;
                 resp.schema = Some(decode_schema_definition(&schema_data)?);
             }
-            (2, WIRE_BYTES) => {
+            // field 3 = DataPage (oneof payload)
+            (3, WIRE_BYTES) => {
                 let page_data = decode_bytes_field(data, &mut pos)?;
                 resp.page = Some(decode_data_page(&page_data)?);
             }
-            (3, WIRE_BYTES) => {
+            // field 4 = Error (oneof payload)
+            (4, WIRE_BYTES) => {
                 let err_data = decode_bytes_field(data, &mut pos)?;
                 resp.error = Some(decode_proto_error(&err_data)?);
             }
-            (4, WIRE_BYTES) => {
+            // field 5 = ExecutionMetrics (oneof payload)
+            (5, WIRE_BYTES) => {
                 let metrics_data = decode_bytes_field(data, &mut pos)?;
                 resp.metrics = Some(decode_execution_metrics(&metrics_data)?);
             }
-            (5, WIRE_BYTES) => {
+            // field 8 = Heartbeat (oneof payload)
+            (8, WIRE_BYTES) => {
                 let _heartbeat_data = decode_bytes_field(data, &mut pos)?;
                 resp.heartbeat = Some(Heartbeat);
             }
@@ -646,19 +757,19 @@ pub fn decode_quic_server_message(data: &[u8]) -> Result<QuicServerMessage> {
                 let exec_data = decode_bytes_field(data, &mut pos)?;
                 msg.execute = Some(decode_execution_response(&exec_data)?);
             }
-            (3, WIRE_BYTES) => {
+            (4, WIRE_BYTES) => {
                 let ping_data = decode_bytes_field(data, &mut pos)?;
                 msg.ping = Some(decode_ping_response(&ping_data)?);
             }
-            (6, WIRE_BYTES) => {
+            (7, WIRE_BYTES) => {
                 let begin_data = decode_bytes_field(data, &mut pos)?;
                 msg.begin = Some(decode_begin_response(&begin_data)?);
             }
-            (7, WIRE_BYTES) => {
+            (8, WIRE_BYTES) => {
                 let commit_data = decode_bytes_field(data, &mut pos)?;
                 msg.commit = Some(decode_commit_response(&commit_data)?);
             }
-            (8, WIRE_BYTES) => {
+            (9, WIRE_BYTES) => {
                 let rollback_data = decode_bytes_field(data, &mut pos)?;
                 msg.rollback = Some(decode_rollback_response(&rollback_data)?);
             }
@@ -712,8 +823,20 @@ mod tests {
     #[test]
     fn test_encode_decode_execute_roundtrip() {
         let mut params = HashMap::new();
-        params.insert("name".to_string(), "Alice".to_string());
-        params.insert("age".to_string(), "30".to_string());
+        params.insert(
+            "name".to_string(),
+            Value {
+                string_val: Some("Alice".to_string()),
+                ..Default::default()
+            },
+        );
+        params.insert(
+            "age".to_string(),
+            Value {
+                int_val: Some(30),
+                ..Default::default()
+            },
+        );
 
         let req = ExecuteRequest {
             session_id: "session123".to_string(),

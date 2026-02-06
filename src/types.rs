@@ -337,6 +337,35 @@ impl Value {
         }
     }
 
+    /// Convert to a proto::Value for protobuf parameter encoding
+    pub fn to_proto_value(&self) -> crate::proto::Value {
+        match self.kind {
+            ValueKind::Null => crate::proto::Value {
+                null_val: true,
+                ..Default::default()
+            },
+            ValueKind::Int => crate::proto::Value {
+                int_val: Some(self.int_value),
+                ..Default::default()
+            },
+            ValueKind::Bool => crate::proto::Value {
+                bool_val: Some(self.bool_value),
+                ..Default::default()
+            },
+            ValueKind::Decimal => crate::proto::Value {
+                double_val: self.decimal_value.and_then(|d| {
+                    use std::str::FromStr;
+                    f64::from_str(&d.to_string()).ok()
+                }),
+                ..Default::default()
+            },
+            _ => crate::proto::Value {
+                string_val: Some(self.to_proto_string()),
+                ..Default::default()
+            },
+        }
+    }
+
     /// Convert to a string representation for protobuf parameters
     pub fn to_proto_string(&self) -> String {
         match self.kind {
