@@ -1,22 +1,27 @@
 //! gRPC transport implementation for Geode.
 //!
-//! This module provides gRPC client functionality using tonic.
-//! It connects to the Geode server's gRPC service as defined in geode.proto.
+//! This module provides gRPC client functionality using the tonic-generated
+//! `GeodeServiceClient` from `crate::proto::geode_service_client`.
 
 use std::collections::HashMap;
+
+use tonic::Request;
 use tonic::transport::{Channel, Endpoint};
-use tonic::{Request, Streaming};
 
 use crate::client::{Column, Page};
 use crate::dsn::Dsn;
 use crate::error::{Error, Result};
+use crate::proto;
+use crate::proto::execution_response::Payload;
+use crate::proto::geode_service_client::GeodeServiceClient;
 use crate::types::Value;
 
 /// gRPC client for Geode.
 ///
-/// Provides gRPC-based connection to the Geode database server.
+/// Provides gRPC-based connection to the Geode database server using the
+/// tonic-generated service client.
 pub struct GrpcClient {
-    channel: Channel,
+    client: GeodeServiceClient<Channel>,
     session_id: String,
 }
 
@@ -64,8 +69,10 @@ impl GrpcClient {
             .await
             .map_err(|e| Error::connection(format!("gRPC connection failed to {}: {}", addr, e)))?;
 
+        let grpc_client = GeodeServiceClient::new(channel);
+
         let mut client = Self {
-            channel,
+            client: grpc_client,
             session_id: String::new(),
         };
 
@@ -77,18 +84,17 @@ impl GrpcClient {
 
     /// Perform authentication handshake.
     async fn handshake(&mut self, username: Option<&str>, password: Option<&str>) -> Result<()> {
-        let request = GrpcHelloRequest {
+        let request = proto::HelloRequest {
             username: username.unwrap_or("").to_string(),
             password: password.unwrap_or("").to_string(),
             tenant_id: None,
+            client_name: "geode-rust".to_string(),
+            client_version: crate::VERSION.to_string(),
+            wanted_conformance: "minimum".to_string(),
         };
 
-        // Send handshake via gRPC
-        // Note: This is a simplified implementation. The actual gRPC call
-        // depends on the server's service definition.
-        let mut grpc_client = GeodeServiceClient::new(self.channel.clone());
-
-        let response = grpc_client
+        let response = self
+            .client
             .handshake(Request::new(request))
             .await
             .map_err(|e| Error::connection(format!("Handshake failed: {}", e)))?;
@@ -113,20 +119,22 @@ impl GrpcClient {
         gql: &str,
         params: &HashMap<String, Value>,
     ) -> Result<(Page, Option<String>)> {
-        let params_map: HashMap<String, String> = params
+        let proto_params: Vec<proto::Param> = params
             .iter()
-            .map(|(k, v)| (k.clone(), v.to_proto_string()))
+            .map(|(k, v)| proto::Param {
+                name: k.clone(),
+                value: Some(v.to_proto_value()),
+            })
             .collect();
 
-        let request = GrpcExecuteRequest {
+        let request = proto::ExecuteRequest {
             session_id: self.session_id.clone(),
             query: gql.to_string(),
-            parameters: params_map,
+            params: proto_params,
         };
 
-        let mut grpc_client = GeodeServiceClient::new(self.channel.clone());
-
-        let response = grpc_client
+        let response = self
+            .client
             .execute(Request::new(request))
             .await
             .map_err(|e| Error::query(format!("Query execution failed: {}", e)))?;
@@ -136,51 +144,56 @@ impl GrpcClient {
         let mut columns = Vec::new();
         let mut rows = Vec::new();
         let mut final_page = true;
+        let mut ordered = false;
+        let mut order_keys = Vec::new();
 
         while let Some(exec_resp) = stream
             .message()
             .await
             .map_err(|e| Error::query(format!("Failed to read response: {}", e)))?
         {
-            match exec_resp.result {
-                Some(GrpcExecutionResult::Schema(schema)) => {
-                    columns = schema
-                        .columns
-                        .into_iter()
-                        .map(|c| Column {
-                            name: c.name,
-                            col_type: c.r#type,
-                        })
-                        .collect();
-                }
-                Some(GrpcExecutionResult::Page(page)) => {
-                    for row in page.rows {
-                        let mut row_map = HashMap::new();
-                        for (i, col) in columns.iter().enumerate() {
-                            let value = if i < row.values.len() {
-                                Self::convert_proto_value(&row.values[i])
-                            } else {
-                                Value::null()
-                            };
-                            row_map.insert(col.name.clone(), value);
-                        }
-                        rows.push(row_map);
+            if let Some(payload) = exec_resp.payload {
+                match payload {
+                    Payload::Schema(schema) => {
+                        columns = schema
+                            .columns
+                            .into_iter()
+                            .map(|c| Column {
+                                name: c.name,
+                                col_type: c.r#type,
+                            })
+                            .collect();
                     }
-                    final_page = page.last_page;
+                    Payload::Page(page) => {
+                        for row in page.rows {
+                            let mut row_map = HashMap::new();
+                            for (i, col) in columns.iter().enumerate() {
+                                let value = if i < row.values.len() {
+                                    Self::convert_proto_value(&row.values[i])
+                                } else {
+                                    Value::null()
+                                };
+                                row_map.insert(col.name.clone(), value);
+                            }
+                            rows.push(row_map);
+                        }
+                        final_page = page.r#final;
+                        ordered = page.ordered;
+                        order_keys = page.order_keys;
+                    }
+                    Payload::Error(err) => {
+                        return Err(Error::Query {
+                            code: err.code,
+                            message: err.message,
+                        });
+                    }
+                    Payload::Metrics(_) | Payload::Heartbeat(_) => {
+                        // Informational payloads, continue
+                    }
+                    Payload::Explain(_) | Payload::Profile(_) => {
+                        // Plan/profile payloads, continue
+                    }
                 }
-                Some(GrpcExecutionResult::Error(err)) => {
-                    return Err(Error::Query {
-                        code: err.code,
-                        message: err.message,
-                    });
-                }
-                Some(GrpcExecutionResult::Metrics(_)) => {
-                    // Metrics received, continue
-                }
-                Some(GrpcExecutionResult::Heartbeat(_)) => {
-                    // Heartbeat received, continue
-                }
-                None => {}
             }
         }
 
@@ -188,8 +201,8 @@ impl GrpcClient {
             Page {
                 columns,
                 rows,
-                ordered: false,
-                order_keys: Vec::new(),
+                ordered,
+                order_keys,
                 final_page,
             },
             None,
@@ -197,42 +210,89 @@ impl GrpcClient {
     }
 
     /// Convert a proto Value to our Value type.
-    fn convert_proto_value(proto_val: &GrpcValue) -> Value {
+    fn convert_proto_value(proto_val: &proto::Value) -> Value {
+        use crate::proto::value::Kind;
         match &proto_val.kind {
-            Some(GrpcValueKind::StringVal(s)) => Value::string(s.clone()),
-            Some(GrpcValueKind::IntVal(i)) => Value::int(*i),
-            Some(GrpcValueKind::DoubleVal(d)) => {
-                Value::decimal(rust_decimal::Decimal::from_f64_retain(*d).unwrap_or_default())
+            Some(Kind::StringVal(s)) => Value::string(s.value.clone()),
+            Some(Kind::IntVal(i)) => Value::int(i.value),
+            Some(Kind::DoubleVal(d)) => {
+                Value::decimal(rust_decimal::Decimal::from_f64_retain(d.value).unwrap_or_default())
             }
-            Some(GrpcValueKind::BoolVal(b)) => Value::bool(*b),
-            Some(GrpcValueKind::NullVal(true)) => Value::null(),
+            Some(Kind::BoolVal(b)) => Value::bool(*b),
+            Some(Kind::NullVal(_)) => Value::null(),
+            Some(Kind::ListVal(list)) => {
+                let values = list.values.iter().map(Self::convert_proto_value).collect();
+                Value::array(values)
+            }
+            Some(Kind::MapVal(map)) => {
+                let mut obj = HashMap::new();
+                for entry in &map.entries {
+                    if let Some(ref val) = entry.value {
+                        obj.insert(entry.key.clone(), Self::convert_proto_value(val));
+                    }
+                }
+                Value::object(obj)
+            }
+            Some(Kind::DecimalVal(d)) => {
+                if let Ok(dec) = d.coeff.parse::<rust_decimal::Decimal>() {
+                    Value::decimal(dec)
+                } else {
+                    Value::string(d.orig_repr.clone())
+                }
+            }
+            Some(Kind::BytesVal(b)) => Value::string(format!("\\x{}", hex::encode(&b.value))),
             _ => Value::null(),
         }
     }
 
     /// Begin a transaction.
     pub async fn begin(&mut self) -> Result<()> {
-        // gRPC transaction support would go here
-        // For now, return an error as gRPC transactions may need different handling
-        Err(Error::connection("gRPC transactions not yet implemented"))
+        let request = proto::BeginRequest {
+            read_only: false,
+            session_id: self.session_id.clone(),
+        };
+
+        self.client
+            .begin(Request::new(request))
+            .await
+            .map_err(|e| Error::connection(format!("Begin transaction failed: {}", e)))?;
+
+        Ok(())
     }
 
     /// Commit a transaction.
     pub async fn commit(&mut self) -> Result<()> {
-        Err(Error::connection("gRPC transactions not yet implemented"))
+        let request = proto::CommitRequest {
+            session_id: self.session_id.clone(),
+        };
+
+        self.client
+            .commit(Request::new(request))
+            .await
+            .map_err(|e| Error::connection(format!("Commit failed: {}", e)))?;
+
+        Ok(())
     }
 
     /// Rollback a transaction.
     pub async fn rollback(&mut self) -> Result<()> {
-        Err(Error::connection("gRPC transactions not yet implemented"))
+        let request = proto::RollbackRequest {
+            session_id: self.session_id.clone(),
+        };
+
+        self.client
+            .rollback(Request::new(request))
+            .await
+            .map_err(|e| Error::connection(format!("Rollback failed: {}", e)))?;
+
+        Ok(())
     }
 
     /// Send a ping request.
     pub async fn ping(&mut self) -> Result<bool> {
-        let mut grpc_client = GeodeServiceClient::new(self.channel.clone());
-
-        let response = grpc_client
-            .ping(Request::new(GrpcPingRequest {}))
+        let response = self
+            .client
+            .ping(Request::new(proto::PingRequest {}))
             .await
             .map_err(|e| Error::connection(format!("Ping failed: {}", e)))?;
 
@@ -242,237 +302,22 @@ impl GrpcClient {
     /// Close the connection.
     pub fn close(&mut self) -> Result<()> {
         // gRPC channels are automatically closed when dropped
-        // No explicit close action needed
         Ok(())
     }
-}
-
-// =============================================================================
-// gRPC Message Types (matching geode.proto service definitions)
-// =============================================================================
-
-/// gRPC HelloRequest message
-#[derive(Clone, PartialEq, Debug)]
-pub struct GrpcHelloRequest {
-    pub username: String,
-    pub password: String,
-    pub tenant_id: Option<String>,
-}
-
-/// gRPC HelloResponse message
-#[derive(Clone, PartialEq, Debug)]
-pub struct GrpcHelloResponse {
-    pub success: bool,
-    pub session_id: String,
-    pub error_message: String,
-    pub capabilities: Vec<String>,
-}
-
-/// gRPC ExecuteRequest message
-#[derive(Clone, PartialEq, Debug)]
-pub struct GrpcExecuteRequest {
-    pub session_id: String,
-    pub query: String,
-    pub parameters: HashMap<String, String>,
-}
-
-/// gRPC ExecutionResponse result variants
-#[derive(Clone, PartialEq, Debug)]
-pub enum GrpcExecutionResult {
-    Schema(GrpcSchemaDefinition),
-    Page(GrpcDataPage),
-    Error(GrpcError),
-    Metrics(GrpcExecutionMetrics),
-    Heartbeat(GrpcHeartbeat),
-}
-
-/// gRPC ExecutionResponse message
-#[derive(Clone, PartialEq, Debug)]
-pub struct GrpcExecutionResponse {
-    pub result: Option<GrpcExecutionResult>,
-}
-
-/// gRPC SchemaDefinition message
-#[derive(Clone, PartialEq, Debug)]
-pub struct GrpcSchemaDefinition {
-    pub columns: Vec<GrpcColumnDefinition>,
-}
-
-/// gRPC ColumnDefinition message
-#[derive(Clone, PartialEq, Debug)]
-pub struct GrpcColumnDefinition {
-    pub name: String,
-    pub r#type: String,
-}
-
-/// gRPC DataPage message
-#[derive(Clone, PartialEq, Debug)]
-pub struct GrpcDataPage {
-    pub rows: Vec<GrpcRow>,
-    pub last_page: bool,
-}
-
-/// gRPC Row message
-#[derive(Clone, PartialEq, Debug)]
-pub struct GrpcRow {
-    pub values: Vec<GrpcValue>,
-}
-
-/// gRPC Value kind variants
-#[derive(Clone, PartialEq, Debug)]
-pub enum GrpcValueKind {
-    StringVal(String),
-    IntVal(i64),
-    DoubleVal(f64),
-    BoolVal(bool),
-    NullVal(bool),
-}
-
-/// gRPC Value message
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct GrpcValue {
-    pub kind: Option<GrpcValueKind>,
-}
-
-/// gRPC Error message
-#[derive(Clone, PartialEq, Debug)]
-pub struct GrpcError {
-    pub code: String,
-    pub message: String,
-    pub r#type: String,
-}
-
-/// gRPC ExecutionMetrics message
-#[derive(Clone, PartialEq, Debug)]
-pub struct GrpcExecutionMetrics {
-    pub parse_duration_ns: i64,
-    pub plan_duration_ns: i64,
-    pub execute_duration_ns: i64,
-    pub total_duration_ns: i64,
-}
-
-/// gRPC Heartbeat message
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct GrpcHeartbeat;
-
-/// gRPC PingRequest message
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct GrpcPingRequest;
-
-/// gRPC PingResponse message
-#[derive(Clone, PartialEq, Debug)]
-pub struct GrpcPingResponse {
-    pub ok: bool,
-}
-
-// =============================================================================
-// gRPC Service Client (manual implementation matching geode.proto)
-// =============================================================================
-
-/// GeodeService gRPC client
-///
-/// Note: This is a stub implementation. The `inner` field is reserved
-/// for future use when full gRPC support is implemented.
-#[allow(dead_code)]
-pub struct GeodeServiceClient<T> {
-    inner: T,
-}
-
-impl GeodeServiceClient<Channel> {
-    /// Create a new GeodeServiceClient from a channel
-    pub fn new(channel: Channel) -> Self {
-        Self { inner: channel }
-    }
-
-    /// Perform handshake RPC
-    ///
-    /// Note: This is a stub implementation. Full gRPC support requires
-    /// proper protobuf code generation with prost-build.
-    pub async fn handshake(
-        &mut self,
-        _request: Request<GrpcHelloRequest>,
-    ) -> std::result::Result<tonic::Response<GrpcHelloResponse>, tonic::Status> {
-        // TODO: Implement proper gRPC handshake using prost-generated types
-        Err(tonic::Status::unimplemented(
-            "gRPC client not fully implemented",
-        ))
-    }
-
-    /// Execute query RPC (streaming response)
-    ///
-    /// Note: This is a stub implementation.
-    pub async fn execute(
-        &mut self,
-        _request: Request<GrpcExecuteRequest>,
-    ) -> std::result::Result<tonic::Response<Streaming<GrpcExecutionResponse>>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "gRPC client not fully implemented",
-        ))
-    }
-
-    /// Ping RPC
-    ///
-    /// Note: This is a stub implementation.
-    pub async fn ping(
-        &mut self,
-        _request: Request<GrpcPingRequest>,
-    ) -> std::result::Result<tonic::Response<GrpcPingResponse>, tonic::Status> {
-        Err(tonic::Status::unimplemented(
-            "gRPC client not fully implemented",
-        ))
-    }
-}
-
-/// Helper to encode HelloRequest for gRPC.
-/// Reserved for future use when full gRPC encoding is implemented.
-#[allow(dead_code)]
-fn encode_grpc_hello_request(req: &GrpcHelloRequest, buf: &mut Vec<u8>) {
-    // Field 1: username
-    if !req.username.is_empty() {
-        buf.push(0x0a); // tag 1, wire type 2 (length-delimited)
-        encode_varint(req.username.len() as u64, buf);
-        buf.extend(req.username.as_bytes());
-    }
-    // Field 2: password
-    if !req.password.is_empty() {
-        buf.push(0x12); // tag 2, wire type 2
-        encode_varint(req.password.len() as u64, buf);
-        buf.extend(req.password.as_bytes());
-    }
-    // Field 3: tenant_id (optional)
-    if let Some(ref tenant) = req.tenant_id {
-        if !tenant.is_empty() {
-            buf.push(0x1a); // tag 3, wire type 2
-            encode_varint(tenant.len() as u64, buf);
-            buf.extend(tenant.as_bytes());
-        }
-    }
-}
-
-/// Encode a varint for protobuf encoding.
-#[allow(dead_code)]
-fn encode_varint(mut v: u64, buf: &mut Vec<u8>) {
-    while v >= 0x80 {
-        buf.push((v as u8) | 0x80);
-        v >>= 7;
-    }
-    buf.push(v as u8);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_grpc_value_default() {
-        let val = GrpcValue::default();
-        assert!(val.kind.is_none());
-    }
+    use crate::proto;
 
     #[test]
     fn test_convert_proto_value_string() {
-        let proto_val = GrpcValue {
-            kind: Some(GrpcValueKind::StringVal("hello".to_string())),
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::StringVal(proto::StringValue {
+                value: "hello".to_string(),
+                kind: 0,
+            })),
         };
         let val = GrpcClient::convert_proto_value(&proto_val);
         assert_eq!(val.as_string().unwrap(), "hello");
@@ -480,8 +325,11 @@ mod tests {
 
     #[test]
     fn test_convert_proto_value_int() {
-        let proto_val = GrpcValue {
-            kind: Some(GrpcValueKind::IntVal(42)),
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::IntVal(proto::IntValue {
+                value: 42,
+                kind: 0,
+            })),
         };
         let val = GrpcClient::convert_proto_value(&proto_val);
         assert_eq!(val.as_int().unwrap(), 42);
@@ -489,8 +337,8 @@ mod tests {
 
     #[test]
     fn test_convert_proto_value_bool() {
-        let proto_val = GrpcValue {
-            kind: Some(GrpcValueKind::BoolVal(true)),
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::BoolVal(true)),
         };
         let val = GrpcClient::convert_proto_value(&proto_val);
         assert!(val.as_bool().unwrap());
@@ -498,8 +346,8 @@ mod tests {
 
     #[test]
     fn test_convert_proto_value_null() {
-        let proto_val = GrpcValue {
-            kind: Some(GrpcValueKind::NullVal(true)),
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::NullVal(proto::NullValue {})),
         };
         let val = GrpcClient::convert_proto_value(&proto_val);
         assert!(val.is_null());
@@ -507,8 +355,67 @@ mod tests {
 
     #[test]
     fn test_convert_proto_value_none() {
-        let proto_val = GrpcValue { kind: None };
+        let proto_val = proto::Value { kind: None };
         let val = GrpcClient::convert_proto_value(&proto_val);
         assert!(val.is_null());
+    }
+
+    #[test]
+    fn test_convert_proto_value_double() {
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::DoubleVal(proto::DoubleValue {
+                value: 3.15,
+                kind: 0,
+            })),
+        };
+        let val = GrpcClient::convert_proto_value(&proto_val);
+        assert!(val.as_decimal().is_ok());
+    }
+
+    #[test]
+    fn test_convert_proto_value_list() {
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::ListVal(proto::ListValue {
+                values: vec![
+                    proto::Value {
+                        kind: Some(proto::value::Kind::IntVal(proto::IntValue {
+                            value: 1,
+                            kind: 0,
+                        })),
+                    },
+                    proto::Value {
+                        kind: Some(proto::value::Kind::IntVal(proto::IntValue {
+                            value: 2,
+                            kind: 0,
+                        })),
+                    },
+                ],
+            })),
+        };
+        let val = GrpcClient::convert_proto_value(&proto_val);
+        let arr = val.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0].as_int().unwrap(), 1);
+        assert_eq!(arr[1].as_int().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_convert_proto_value_map() {
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::MapVal(proto::MapValue {
+                entries: vec![proto::MapEntry {
+                    key: "name".to_string(),
+                    value: Some(proto::Value {
+                        kind: Some(proto::value::Kind::StringVal(proto::StringValue {
+                            value: "Alice".to_string(),
+                            kind: 0,
+                        })),
+                    }),
+                }],
+            })),
+        };
+        let val = GrpcClient::convert_proto_value(&proto_val);
+        let obj = val.as_object().unwrap();
+        assert_eq!(obj.get("name").unwrap().as_string().unwrap(), "Alice");
     }
 }

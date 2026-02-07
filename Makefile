@@ -39,6 +39,7 @@ help:
 	@echo "  make test-proptest  - Run property-based tests (28 tests)"
 	@echo "  make test-doc       - Run documentation tests"
 	@echo "  make test-integration - Run integration tests (requires Geode server)"
+	@echo "  make test-integration-grpc - Run gRPC integration tests"
 	@echo "  make test-all       - Run ALL tests including integration"
 	@echo ""
 	@echo "Quality targets:"
@@ -135,6 +136,15 @@ test-integration-docker:
 	@echo ""
 	GEODE_USE_DOCKER=true $(CARGO) test --features integration $(CARGO_FLAGS) -- --test-threads=1
 	@echo "✓ Docker integration tests complete (36 tests)"
+
+test-integration-grpc:
+	@echo "Running gRPC integration tests..."
+	@echo ""
+	@echo "Tests connect to Geode gRPC server"
+	@echo "Start server first: cd ../geode && ./zig-out/bin/geode serve --listen-grpc 0.0.0.0:50051"
+	@echo ""
+	GEODE_TRANSPORT=grpc $(CARGO) test --features integration $(CARGO_FLAGS) -- --test-threads=1
+	@echo "✓ gRPC integration tests complete"
 
 test-all: test-unit test-proptest test-doc test-integration
 	@echo "✓ All tests complete (including integration)"

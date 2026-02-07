@@ -329,6 +329,7 @@ pub struct Client {
     transport: Transport,
     host: String,
     port: u16,
+    tls_enabled: bool,
     skip_verify: bool,
     page_size: usize,
     hello_name: String,
@@ -371,6 +372,7 @@ impl Client {
             transport: Transport::Quic,
             host: host.into(),
             port,
+            tls_enabled: true,
             skip_verify: false,
             page_size: 1000,
             hello_name: "geode-rust".to_string(),
@@ -438,6 +440,7 @@ impl Client {
             transport: dsn.transport(),
             host: dsn.host().to_string(),
             port: dsn.port(),
+            tls_enabled: dsn.tls_enabled(),
             skip_verify: dsn.skip_verify(),
             page_size: dsn.page_size(),
             hello_name: dsn.client_name().to_string(),
@@ -691,6 +694,7 @@ impl Client {
                     Connection::new_grpc(
                         &self.host,
                         self.port,
+                        self.tls_enabled,
                         self.skip_verify,
                         self.page_size,
                         self.username.as_deref(),
@@ -836,6 +840,7 @@ impl Connection {
     async fn new_grpc(
         host: &str,
         port: u16,
+        tls_enabled: bool,
         skip_verify: bool,
         page_size: usize,
         username: Option<&str>,
@@ -844,13 +849,17 @@ impl Connection {
         use crate::dsn::Dsn;
 
         // Build DSN for gRPC client
+        let tls_val = if tls_enabled { "1" } else { "0" };
         let dsn_str = if let (Some(user), Some(pass)) = (username, password) {
             format!(
-                "grpc://{}:{}@{}:{}?insecure={}",
-                user, pass, host, port, skip_verify
+                "grpc://{}:{}@{}:{}?tls={}&insecure={}",
+                user, pass, host, port, tls_val, skip_verify
             )
         } else {
-            format!("grpc://{}:{}?insecure={}", host, port, skip_verify)
+            format!(
+                "grpc://{}:{}?tls={}&insecure={}",
+                host, port, tls_val, skip_verify
+            )
         };
 
         let dsn = Dsn::parse(&dsn_str)?;

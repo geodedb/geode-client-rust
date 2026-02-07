@@ -30,8 +30,11 @@ use tokio::sync::Mutex;
 
 const DEFAULT_GEODE_HOST: &str = "127.0.0.1";
 const DEFAULT_GEODE_PORT: u16 = 3141;
+const DEFAULT_GEODE_GRPC_PORT: u16 = 50051;
 // Port exposed by Docker image for QUIC (UDP)
 const DOCKER_GEODE_PORT: u16 = 3141;
+// Port exposed by Docker image for gRPC (TCP)
+const DOCKER_GRPC_PORT: u16 = 50051;
 // Default to the registry image (available at geodedb/geode)
 // Or build locally with: cd ../geode && docker build -t geode:local .
 const DEFAULT_GEODE_IMAGE: &str = "geodedb/geode";
@@ -46,6 +49,7 @@ struct GeodeContainer {
     _container: ContainerAsync<GenericImage>,
     host: String,
     port: u16,
+    grpc_port: u16,
 }
 
 /// Check if we should use Docker mode
@@ -88,10 +92,13 @@ async fn start_geode_container() -> Result<GeodeContainer, Box<dyn std::error::E
     // Match Go client behavior - don't set GEODE_ADMIN_PASSWORD (no auth required by default)
     let container = GenericImage::new(image_name, tag)
         .with_exposed_port(DOCKER_GEODE_PORT.udp())
+        .with_exposed_port(DOCKER_GRPC_PORT.tcp())
         .with_cmd(vec![
             "serve".to_string(),
             "--listen".to_string(),
             format!("0.0.0.0:{}", DOCKER_GEODE_PORT),
+            "--listen-grpc".to_string(),
+            format!("0.0.0.0:{}", DOCKER_GRPC_PORT),
             "--log-level".to_string(),
             "info".to_string(),
         ])
@@ -103,6 +110,7 @@ async fn start_geode_container() -> Result<GeodeContainer, Box<dyn std::error::E
     let port = container
         .get_host_port_ipv4(DOCKER_GEODE_PORT.udp())
         .await?;
+    let grpc_port = container.get_host_port_ipv4(DOCKER_GRPC_PORT.tcp()).await?;
 
     // Wait for QUIC server to be fully ready
     // The server needs time to generate TLS certificates and start the QUIC listener
@@ -121,6 +129,7 @@ async fn start_geode_container() -> Result<GeodeContainer, Box<dyn std::error::E
                     _container: container,
                     host,
                     port,
+                    grpc_port,
                 });
             }
             Err(e) => {
@@ -140,6 +149,13 @@ async fn start_geode_container() -> Result<GeodeContainer, Box<dyn std::error::E
     .into())
 }
 
+/// Check if gRPC transport is requested
+fn use_grpc_transport() -> bool {
+    env::var("GEODE_TRANSPORT")
+        .map(|v| v.to_lowercase() == "grpc")
+        .unwrap_or(false)
+}
+
 /// Get server connection info (either local or Docker)
 async fn get_server_info() -> (String, u16) {
     if use_docker_mode() {
@@ -147,6 +163,9 @@ async fn get_server_info() -> (String, u16) {
         let mut guard = CONTAINER.lock().await;
 
         if let Some(ref container) = *guard {
+            if use_grpc_transport() {
+                return (container.host.clone(), container.grpc_port);
+            }
             return (container.host.clone(), container.port);
         }
 
@@ -164,19 +183,48 @@ async fn get_server_info() -> (String, u16) {
         });
 
         let host = container.host.clone();
-        let port = container.port;
+        let port = if use_grpc_transport() {
+            container.grpc_port
+        } else {
+            container.port
+        };
         *guard = Some(container);
 
         (host, port)
     } else {
         // Use local server
-        get_local_server_info()
+        if use_grpc_transport() {
+            let host = env::var("GEODE_HOST").unwrap_or_else(|_| DEFAULT_GEODE_HOST.to_string());
+            let port = env::var("GEODE_GRPC_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(DEFAULT_GEODE_GRPC_PORT);
+            (host, port)
+        } else {
+            get_local_server_info()
+        }
     }
 }
 
 /// Create a test connection
 async fn get_test_connection() -> Connection {
     let (host, port) = get_server_info().await;
+
+    if use_grpc_transport() {
+        // Use gRPC transport via DSN, include credentials if set
+        let dsn = match (env::var("GEODE_USERNAME"), env::var("GEODE_PASSWORD")) {
+            (Ok(user), Ok(pass)) => format!("grpc://{}:{}@{}:{}?tls=0", user, pass, host, port),
+            _ => format!("grpc://{}:{}?tls=0", host, port),
+        };
+        let client = Client::from_dsn(&dsn)
+            .unwrap_or_else(|e| panic!("Failed to parse gRPC DSN {}: {}", dsn, e));
+        return client.connect().await.unwrap_or_else(|e| {
+            panic!(
+                "Failed to connect to Geode gRPC at {}:{}: {}. Make sure Geode is running with --listen-grpc.",
+                host, port, e
+            )
+        });
+    }
 
     // Match Go client behavior - no auth credentials by default
     // Override with GEODE_USERNAME/GEODE_PASSWORD if needed

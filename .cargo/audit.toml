@@ -28,4 +28,14 @@ ignore = [
     # (rustls) remains actively maintained and secure.
     # Review date: 2026-02-05
     "RUSTSEC-2025-0134",
+
+    # RUSTSEC-2026-0009: time 0.3.45 stack exhaustion DoS
+    # Status: ACCEPTED RISK (Dev-only transitive dependency)
+    # Justification: This advisory affects time >=0.3.35, <0.3.47 which is a
+    # transitive dependency via testcontainers → serde_with → time. It is only
+    # present in dev-dependencies and never included in production builds.
+    # The vulnerability is a stack exhaustion DoS via crafted input, which has
+    # no impact in our controlled test environment.
+    # Review date: 2026-02-06
+    "RUSTSEC-2026-0009",
 ]
