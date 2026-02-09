@@ -1123,8 +1123,11 @@ impl Connection {
     ) -> Result<Option<proto::QuicServerMessage>> {
         // Try to read with a short timeout
         let mut length_buf = [0u8; 4];
-        let read_result =
-            timeout(Duration::from_millis(10), recv.read_exact(&mut length_buf)).await;
+        let read_result = timeout(
+            Duration::from_millis(5000),
+            recv.read_exact(&mut length_buf),
+        )
+        .await;
 
         match read_result {
             Ok(Ok(())) => {
@@ -1216,9 +1219,9 @@ impl Connection {
             Some(proto::value::Kind::EdgeVal(edge)) => {
                 let mut obj = std::collections::HashMap::new();
                 obj.insert("id".to_string(), Value::int(edge.id as i64));
-                obj.insert("from_id".to_string(), Value::int(edge.from_id as i64));
-                obj.insert("to_id".to_string(), Value::int(edge.to_id as i64));
-                obj.insert("label".to_string(), Value::string(edge.label.clone()));
+                obj.insert("start_node".to_string(), Value::int(edge.from_id as i64));
+                obj.insert("end_node".to_string(), Value::int(edge.to_id as i64));
+                obj.insert("type".to_string(), Value::string(edge.label.clone()));
                 let mut props = std::collections::HashMap::new();
                 for entry in &edge.properties {
                     let val = entry
@@ -2441,5 +2444,99 @@ mod tests {
             .hello_timeout(u64::MAX)
             .idle_timeout(u64::MAX);
         // Builder should accept any u64 value without panicking
+    }
+
+    #[test]
+    fn test_convert_edge_uses_type_field() {
+        let edge = proto::EdgeValue {
+            id: 100,
+            from_id: 1,
+            to_id: 2,
+            label: "KNOWS".to_string(),
+            properties: vec![],
+        };
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::EdgeVal(edge)),
+        };
+        let val = Connection::convert_proto_value_static(&proto_val);
+        let obj = val.as_object().unwrap();
+        assert_eq!(obj.get("type").unwrap().as_string().unwrap(), "KNOWS");
+        assert!(
+            obj.get("label").is_none(),
+            "edge should not have 'label' field"
+        );
+    }
+
+    #[test]
+    fn test_convert_edge_uses_start_end_node() {
+        let edge = proto::EdgeValue {
+            id: 100,
+            from_id: 42,
+            to_id: 99,
+            label: "LIKES".to_string(),
+            properties: vec![],
+        };
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::EdgeVal(edge)),
+        };
+        let val = Connection::convert_proto_value_static(&proto_val);
+        let obj = val.as_object().unwrap();
+        assert_eq!(obj.get("start_node").unwrap().as_int().unwrap(), 42);
+        assert_eq!(obj.get("end_node").unwrap().as_int().unwrap(), 99);
+        assert!(obj.get("from_id").is_none());
+        assert!(obj.get("to_id").is_none());
+    }
+
+    #[test]
+    fn test_convert_edge_with_properties() {
+        let edge = proto::EdgeValue {
+            id: 100,
+            from_id: 1,
+            to_id: 2,
+            label: "KNOWS".to_string(),
+            properties: vec![proto::MapEntry {
+                key: "since".to_string(),
+                value: Some(proto::Value {
+                    kind: Some(proto::value::Kind::IntVal(proto::IntValue {
+                        value: 2020,
+                        kind: 1,
+                    })),
+                }),
+            }],
+        };
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::EdgeVal(edge)),
+        };
+        let val = Connection::convert_proto_value_static(&proto_val);
+        let obj = val.as_object().unwrap();
+        let props = obj.get("properties").unwrap().as_object().unwrap();
+        assert_eq!(props.get("since").unwrap().as_int().unwrap(), 2020);
+    }
+
+    #[test]
+    fn test_convert_node_fields() {
+        let node = proto::NodeValue {
+            id: 42,
+            labels: vec!["Person".to_string()],
+            properties: vec![proto::MapEntry {
+                key: "name".to_string(),
+                value: Some(proto::Value {
+                    kind: Some(proto::value::Kind::StringVal(proto::StringValue {
+                        value: "Alice".to_string(),
+                        kind: 1,
+                    })),
+                }),
+            }],
+        };
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::NodeVal(node)),
+        };
+        let val = Connection::convert_proto_value_static(&proto_val);
+        let obj = val.as_object().unwrap();
+        assert_eq!(obj.get("id").unwrap().as_int().unwrap(), 42);
+        let labels = obj.get("labels").unwrap().as_array().unwrap();
+        assert_eq!(labels.len(), 1);
+        let props = obj.get("properties").unwrap().as_object().unwrap();
+        assert_eq!(props.get("name").unwrap().as_string().unwrap(), "Alice");
     }
 }
