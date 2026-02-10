@@ -1093,53 +1093,56 @@ impl Connection {
     }
 
     /// Read a protobuf message over QUIC with timeout.
+    /// Timeout covers the entire read (length prefix + body) to prevent
+    /// hangs when large responses arrive slowly across multiple QUIC frames.
     async fn read_proto_quic(
         recv: &mut quinn::RecvStream,
         timeout_secs: u64,
     ) -> Result<proto::QuicServerMessage> {
-        // Read 4-byte length prefix
-        let mut length_buf = [0u8; 4];
-        timeout(
-            Duration::from_secs(timeout_secs),
-            recv.read_exact(&mut length_buf),
-        )
+        timeout(Duration::from_secs(timeout_secs), async {
+            // Read 4-byte length prefix
+            let mut length_buf = [0u8; 4];
+            recv.read_exact(&mut length_buf)
+                .await
+                .map_err(|e| Error::connection(format!("Failed to read response length: {}", e)))?;
+
+            let msg_len = u32::from_be_bytes(length_buf) as usize;
+            let mut msg_buf = vec![0u8; msg_len];
+            recv.read_exact(&mut msg_buf)
+                .await
+                .map_err(|e| Error::connection(format!("Failed to read response body: {}", e)))?;
+
+            proto::decode_quic_server_message(&msg_buf)
+        })
         .await
         .map_err(|_| Error::timeout())?
-        .map_err(|e| Error::connection(format!("Failed to read response length: {}", e)))?;
-
-        let msg_len = u32::from_be_bytes(length_buf) as usize;
-        let mut msg_buf = vec![0u8; msg_len];
-        recv.read_exact(&mut msg_buf)
-            .await
-            .map_err(|e| Error::connection(format!("Failed to read response body: {}", e)))?;
-
-        proto::decode_quic_server_message(&msg_buf)
     }
 
     /// Attempt to read a buffered protobuf message without blocking (QUIC).
     /// Returns Ok(None) if no complete message is available immediately.
+    /// Timeout covers the entire read (length prefix + body).
     async fn try_read_proto_quic(
         recv: &mut quinn::RecvStream,
     ) -> Result<Option<proto::QuicServerMessage>> {
-        // Try to read with a short timeout
-        let mut length_buf = [0u8; 4];
-        let read_result = timeout(
-            Duration::from_millis(5000),
-            recv.read_exact(&mut length_buf),
-        )
+        let read_result = timeout(Duration::from_millis(5000), async {
+            let mut length_buf = [0u8; 4];
+            recv.read_exact(&mut length_buf)
+                .await
+                .map_err(|e| Error::connection(format!("Failed to read response: {}", e)))?;
+
+            let msg_len = u32::from_be_bytes(length_buf) as usize;
+            let mut msg_buf = vec![0u8; msg_len];
+            recv.read_exact(&mut msg_buf)
+                .await
+                .map_err(|e| Error::connection(format!("Failed to read response body: {}", e)))?;
+
+            proto::decode_quic_server_message(&msg_buf)
+        })
         .await;
 
         match read_result {
-            Ok(Ok(())) => {
-                let msg_len = u32::from_be_bytes(length_buf) as usize;
-                let mut msg_buf = vec![0u8; msg_len];
-                recv.read_exact(&mut msg_buf).await.map_err(|e| {
-                    Error::connection(format!("Failed to read response body: {}", e))
-                })?;
-                let msg = proto::decode_quic_server_message(&msg_buf)?;
-                Ok(Some(msg))
-            }
-            Ok(Err(e)) => Err(Error::connection(format!("Failed to read response: {}", e))),
+            Ok(Ok(msg)) => Ok(Some(msg)),
+            Ok(Err(e)) => Err(e),
             Err(_) => Ok(None), // Timeout - no data available
         }
     }
