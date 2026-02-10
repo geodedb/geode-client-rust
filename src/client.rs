@@ -1413,6 +1413,86 @@ impl Connection {
         params: &HashMap<String, Value>,
         session_id: &str,
     ) -> Result<(Page, Option<String>)> {
+        let (page, cursor) =
+            Self::query_with_params_quic_inner(send, recv, gql, params, session_id).await?;
+
+        // If the first page is not final, fetch remaining pages via PULL
+        if !page.final_page {
+            let mut all_rows = page.rows;
+            let columns = page.columns;
+            let mut ordered = page.ordered;
+            let mut order_keys = page.order_keys;
+            let mut request_id: u64 = 0;
+
+            loop {
+                request_id += 1;
+                let pull_req = proto::QuicClientMessage {
+                    msg: Some(proto::quic_client_message::Msg::Pull(proto::PullRequest {
+                        request_id,
+                        page_size: 1000,
+                        session_id: String::new(),
+                    })),
+                };
+                Self::send_proto_quic(send, &pull_req).await?;
+
+                let resp = Self::read_proto_quic(recv, 30).await?;
+
+                // Server sends pull data in pull.response
+                let exec_resp = match &resp.msg {
+                    Some(proto::quic_server_message::Msg::Pull(pull)) => pull.response.as_ref(),
+                    Some(proto::quic_server_message::Msg::Execute(e)) => Some(e),
+                    _ => None,
+                };
+
+                let exec_resp = match exec_resp {
+                    Some(e) => e,
+                    None => break,
+                };
+
+                if let Some(proto::execution_response::Payload::Error(ref err)) = exec_resp.payload
+                {
+                    return Err(Error::Query {
+                        code: err.code.clone(),
+                        message: err.message.clone(),
+                    });
+                }
+
+                if let Some(proto::execution_response::Payload::Page(ref page_data)) =
+                    exec_resp.payload
+                {
+                    let rows = Self::parse_proto_rows_static(&page_data.rows, &columns)?;
+                    all_rows.extend(rows);
+                    ordered = page_data.ordered;
+                    order_keys = page_data.order_keys.clone();
+                    if page_data.r#final {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            let final_page = Page {
+                columns,
+                rows: all_rows,
+                ordered,
+                order_keys,
+                final_page: true,
+            };
+            return Ok((final_page, cursor));
+        }
+
+        Ok((page, cursor))
+    }
+
+    /// Inner implementation for QUIC query (reads first page).
+    async fn query_with_params_quic_inner(
+        send: &mut quinn::SendStream,
+        recv: &mut quinn::RecvStream,
+        gql: &str,
+        params: &HashMap<String, Value>,
+        session_id: &str,
+    ) -> Result<(Page, Option<String>)> {
         // Convert types::Value to proto::Param entries
         let params_proto: Vec<proto::Param> = params
             .iter()
