@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "geode-client"
-version = "0.1.1-alpha.17"
+version = "0.1.1-alpha.19"
 dependencies = [
  "anyhow",
  "arbitrary",
