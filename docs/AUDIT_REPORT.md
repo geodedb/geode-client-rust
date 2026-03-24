@@ -172,19 +172,26 @@
 | Perf: tokio "full" | Narrowed to selective features |
 | Perf: No [profile.release] | Added lto="thin", codegen-units=1 |
 
-### Remaining (require architectural changes or server testing)
+### Round 3 closures (commits 0f3706b, 2422d20, 1d5e4e6, fde6845)
+
+| Finding | Fix |
+|---------|-----|
+| type_name.to_uppercase() per cell | Replaced with eq_ignore_ascii_case (100K allocs eliminated) |
+| grpcs:// scheme missing | Added to DSN parser with TLS forced on |
+| savepoint()/rollback_to() missing | Implemented for QUIC transport; gRPC stubs until RPC defined |
+| client.rs proto duplication | Extracted shared convert.rs module (175 lines removed, 13 tests added) |
+
+### Remaining (require dedicated PRs)
 
 | Finding | Domain | Reason |
 |---------|--------|--------|
-| savepoint()/rollback_to() missing | Gap | Requires new proto message implementation |
-| client.rs 2695 lines | Quality | Major refactoring effort |
-| Value struct ~250 bytes | Perf | Breaking API change (enum redesign) |
+| Value struct ~250 bytes | Perf/P1 | Breaking public API (pub kind field); needs migration PR |
 | QueryBuilder type mismatch | Quality | Breaking API change |
-| type_name.to_uppercase() per cell | Perf | Requires decode_value refactor |
-| README examples wrong signatures | Gap | Docs-only, deferred |
+| README examples wrong signatures | Gap | Docs-only |
 | gRPC connection pool support | Gap | Architecture change |
 | Decimal precision loss in to_proto_value | Quality | Requires proto schema analysis |
 | AuthClient empty stub | Gap | Requires server protocol support |
+| client.rs still 2600+ lines | Quality | Further decomposition possible |
 
 ## Blockers
 
