@@ -56,6 +56,7 @@
 
 pub mod auth;
 pub mod client;
+mod convert;
 pub mod dsn;
 pub mod error;
 pub mod pool;

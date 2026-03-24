@@ -1196,7 +1196,7 @@ impl Connection {
             let mut row = HashMap::with_capacity(columns.len());
             for (i, col) in columns.iter().enumerate() {
                 let value = if i < proto_row.values.len() {
-                    Self::convert_proto_value_static(&proto_row.values[i])
+                    crate::convert::proto_to_value(&proto_row.values[i])
                 } else {
                     Value::null()
                 };
@@ -1205,107 +1205,6 @@ impl Connection {
             rows.push(row);
         }
         Ok(rows)
-    }
-
-    /// Maximum recursion depth for converting nested protobuf values (CWE-674).
-    const MAX_PROTO_RECURSION_DEPTH: usize = 64;
-
-    /// Convert a protobuf Value to our Value type (static version).
-    /// Delegates to the depth-limited variant starting at depth 0.
-    fn convert_proto_value_static(proto_val: &proto::Value) -> Value {
-        Self::convert_proto_value_with_depth(proto_val, 0)
-    }
-
-    /// Depth-limited conversion of protobuf Value to our Value type.
-    /// Returns `Value::null()` when recursion exceeds `MAX_PROTO_RECURSION_DEPTH`
-    /// to prevent stack overflow from deeply nested or malicious payloads (CWE-674).
-    fn convert_proto_value_with_depth(proto_val: &proto::Value, depth: usize) -> Value {
-        if depth > Self::MAX_PROTO_RECURSION_DEPTH {
-            return Value::null();
-        }
-
-        let next_depth = depth + 1;
-
-        match &proto_val.kind {
-            Some(proto::value::Kind::NullVal(_)) => Value::null(),
-            Some(proto::value::Kind::StringVal(s)) => Value::string(s.value.clone()),
-            Some(proto::value::Kind::IntVal(i)) => Value::int(i.value),
-            Some(proto::value::Kind::DoubleVal(d)) => {
-                Value::decimal(rust_decimal::Decimal::from_f64_retain(d.value).unwrap_or_default())
-            }
-            Some(proto::value::Kind::BoolVal(b)) => Value::bool(*b),
-            Some(proto::value::Kind::ListVal(list)) => {
-                let values: Vec<Value> = list
-                    .values
-                    .iter()
-                    .map(|v| Self::convert_proto_value_with_depth(v, next_depth))
-                    .collect();
-                Value::array(values)
-            }
-            Some(proto::value::Kind::MapVal(map)) => {
-                let mut obj = std::collections::HashMap::new();
-                for entry in &map.entries {
-                    let val = entry
-                        .value
-                        .as_ref()
-                        .map(|v| Self::convert_proto_value_with_depth(v, next_depth))
-                        .unwrap_or_else(Value::null);
-                    obj.insert(entry.key.clone(), val);
-                }
-                Value::object(obj)
-            }
-            Some(proto::value::Kind::NodeVal(node)) => {
-                let mut obj = std::collections::HashMap::new();
-                obj.insert("id".to_string(), Value::int(node.id as i64));
-                let labels: Vec<Value> = node
-                    .labels
-                    .iter()
-                    .map(|l| Value::string(l.clone()))
-                    .collect();
-                obj.insert("labels".to_string(), Value::array(labels));
-                let mut props = std::collections::HashMap::new();
-                for entry in &node.properties {
-                    let val = entry
-                        .value
-                        .as_ref()
-                        .map(|v| Self::convert_proto_value_with_depth(v, next_depth))
-                        .unwrap_or_else(Value::null);
-                    props.insert(entry.key.clone(), val);
-                }
-                obj.insert("properties".to_string(), Value::object(props));
-                Value::object(obj)
-            }
-            Some(proto::value::Kind::EdgeVal(edge)) => {
-                let mut obj = std::collections::HashMap::new();
-                obj.insert("id".to_string(), Value::int(edge.id as i64));
-                obj.insert("start_node".to_string(), Value::int(edge.from_id as i64));
-                obj.insert("end_node".to_string(), Value::int(edge.to_id as i64));
-                obj.insert("type".to_string(), Value::string(edge.label.clone()));
-                let mut props = std::collections::HashMap::new();
-                for entry in &edge.properties {
-                    let val = entry
-                        .value
-                        .as_ref()
-                        .map(|v| Self::convert_proto_value_with_depth(v, next_depth))
-                        .unwrap_or_else(Value::null);
-                    props.insert(entry.key.clone(), val);
-                }
-                obj.insert("properties".to_string(), Value::object(props));
-                Value::object(obj)
-            }
-            Some(proto::value::Kind::DecimalVal(d)) => {
-                // Try to parse the decimal from coeff + scale
-                if let Ok(dec) = d.coeff.parse::<rust_decimal::Decimal>() {
-                    Value::decimal(dec)
-                } else {
-                    Value::string(d.orig_repr.clone())
-                }
-            }
-            Some(proto::value::Kind::BytesVal(b)) => {
-                Value::string(format!("\\x{}", hex::encode(&b.value)))
-            }
-            _ => Value::null(),
-        }
     }
 
     /// Send BEGIN transaction command over QUIC.
@@ -2782,7 +2681,7 @@ mod tests {
         let proto_val = proto::Value {
             kind: Some(proto::value::Kind::EdgeVal(edge)),
         };
-        let val = Connection::convert_proto_value_static(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         let obj = val.as_object().unwrap();
         assert_eq!(obj.get("type").unwrap().as_string().unwrap(), "KNOWS");
         assert!(
@@ -2803,7 +2702,7 @@ mod tests {
         let proto_val = proto::Value {
             kind: Some(proto::value::Kind::EdgeVal(edge)),
         };
-        let val = Connection::convert_proto_value_static(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         let obj = val.as_object().unwrap();
         assert_eq!(obj.get("start_node").unwrap().as_int().unwrap(), 42);
         assert_eq!(obj.get("end_node").unwrap().as_int().unwrap(), 99);
@@ -2831,7 +2730,7 @@ mod tests {
         let proto_val = proto::Value {
             kind: Some(proto::value::Kind::EdgeVal(edge)),
         };
-        let val = Connection::convert_proto_value_static(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         let obj = val.as_object().unwrap();
         let props = obj.get("properties").unwrap().as_object().unwrap();
         assert_eq!(props.get("since").unwrap().as_int().unwrap(), 2020);
@@ -2855,7 +2754,7 @@ mod tests {
         let proto_val = proto::Value {
             kind: Some(proto::value::Kind::NodeVal(node)),
         };
-        let val = Connection::convert_proto_value_static(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         let obj = val.as_object().unwrap();
         assert_eq!(obj.get("id").unwrap().as_int().unwrap(), 42);
         let labels = obj.get("labels").unwrap().as_array().unwrap();

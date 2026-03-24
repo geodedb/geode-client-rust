@@ -169,7 +169,7 @@ impl GrpcClient {
                             let mut row_map = HashMap::new();
                             for (i, col) in columns.iter().enumerate() {
                                 let value = if i < row.values.len() {
-                                    Self::convert_proto_value(&row.values[i])
+                                    crate::convert::proto_to_value(&row.values[i])
                                 } else {
                                     Value::null()
                                 };
@@ -207,65 +207,6 @@ impl GrpcClient {
             },
             None,
         ))
-    }
-
-    /// Maximum recursion depth for converting nested protobuf values (CWE-674).
-    const MAX_PROTO_RECURSION_DEPTH: usize = 64;
-
-    /// Convert a proto Value to our Value type.
-    /// Delegates to the depth-limited variant starting at depth 0.
-    fn convert_proto_value(proto_val: &proto::Value) -> Value {
-        Self::convert_proto_value_with_depth(proto_val, 0)
-    }
-
-    /// Depth-limited conversion of protobuf Value to our Value type.
-    /// Returns `Value::null()` when recursion exceeds `MAX_PROTO_RECURSION_DEPTH`
-    /// to prevent stack overflow from deeply nested or malicious payloads (CWE-674).
-    fn convert_proto_value_with_depth(proto_val: &proto::Value, depth: usize) -> Value {
-        if depth > Self::MAX_PROTO_RECURSION_DEPTH {
-            return Value::null();
-        }
-
-        let next_depth = depth + 1;
-        use crate::proto::value::Kind;
-        match &proto_val.kind {
-            Some(Kind::StringVal(s)) => Value::string(s.value.clone()),
-            Some(Kind::IntVal(i)) => Value::int(i.value),
-            Some(Kind::DoubleVal(d)) => {
-                Value::decimal(rust_decimal::Decimal::from_f64_retain(d.value).unwrap_or_default())
-            }
-            Some(Kind::BoolVal(b)) => Value::bool(*b),
-            Some(Kind::NullVal(_)) => Value::null(),
-            Some(Kind::ListVal(list)) => {
-                let values = list
-                    .values
-                    .iter()
-                    .map(|v| Self::convert_proto_value_with_depth(v, next_depth))
-                    .collect();
-                Value::array(values)
-            }
-            Some(Kind::MapVal(map)) => {
-                let mut obj = HashMap::new();
-                for entry in &map.entries {
-                    if let Some(ref val) = entry.value {
-                        obj.insert(
-                            entry.key.clone(),
-                            Self::convert_proto_value_with_depth(val, next_depth),
-                        );
-                    }
-                }
-                Value::object(obj)
-            }
-            Some(Kind::DecimalVal(d)) => {
-                if let Ok(dec) = d.coeff.parse::<rust_decimal::Decimal>() {
-                    Value::decimal(dec)
-                } else {
-                    Value::string(d.orig_repr.clone())
-                }
-            }
-            Some(Kind::BytesVal(b)) => Value::string(format!("\\x{}", hex::encode(&b.value))),
-            _ => Value::null(),
-        }
     }
 
     /// Begin a transaction.
@@ -351,7 +292,6 @@ impl GrpcClient {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::proto;
 
     #[test]
@@ -362,7 +302,7 @@ mod tests {
                 kind: 0,
             })),
         };
-        let val = GrpcClient::convert_proto_value(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         assert_eq!(val.as_string().unwrap(), "hello");
     }
 
@@ -374,7 +314,7 @@ mod tests {
                 kind: 0,
             })),
         };
-        let val = GrpcClient::convert_proto_value(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         assert_eq!(val.as_int().unwrap(), 42);
     }
 
@@ -383,7 +323,7 @@ mod tests {
         let proto_val = proto::Value {
             kind: Some(proto::value::Kind::BoolVal(true)),
         };
-        let val = GrpcClient::convert_proto_value(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         assert!(val.as_bool().unwrap());
     }
 
@@ -392,14 +332,14 @@ mod tests {
         let proto_val = proto::Value {
             kind: Some(proto::value::Kind::NullVal(proto::NullValue {})),
         };
-        let val = GrpcClient::convert_proto_value(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         assert!(val.is_null());
     }
 
     #[test]
     fn test_convert_proto_value_none() {
         let proto_val = proto::Value { kind: None };
-        let val = GrpcClient::convert_proto_value(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         assert!(val.is_null());
     }
 
@@ -411,7 +351,7 @@ mod tests {
                 kind: 0,
             })),
         };
-        let val = GrpcClient::convert_proto_value(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         assert!(val.as_decimal().is_ok());
     }
 
@@ -435,7 +375,7 @@ mod tests {
                 ],
             })),
         };
-        let val = GrpcClient::convert_proto_value(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         let arr = val.as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0].as_int().unwrap(), 1);
@@ -457,7 +397,7 @@ mod tests {
                 }],
             })),
         };
-        let val = GrpcClient::convert_proto_value(&proto_val);
+        let val = crate::convert::proto_to_value(&proto_val);
         let obj = val.as_object().unwrap();
         assert_eq!(obj.get("name").unwrap().as_string().unwrap(), "Alice");
     }
