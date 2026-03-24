@@ -789,6 +789,8 @@ pub struct Connection {
     /// Page size for query results (reserved for future use)
     #[allow(dead_code)]
     page_size: usize,
+    /// Whether this connection is currently inside a transaction
+    in_transaction: bool,
 }
 
 impl Connection {
@@ -875,6 +877,7 @@ impl Connection {
         Ok(Self {
             kind: ConnectionKind::Grpc { client },
             page_size,
+            in_transaction: false,
         })
     }
 
@@ -884,13 +887,13 @@ impl Connection {
         port: u16,
         skip_verify: bool,
         page_size: usize,
-        _hello_name: &str,
-        _hello_ver: &str,
-        _conformance: &str,
+        hello_name: &str,
+        hello_ver: &str,
+        conformance: &str,
         username: Option<&str>,
         password: Option<&str>,
         connect_timeout_secs: u64,
-        _hello_timeout_secs: u64,
+        hello_timeout_secs: u64,
         idle_timeout_secs: u64,
     ) -> Result<Self> {
         debug!("Creating connection to {}:{}", host, port);
@@ -1027,9 +1030,9 @@ impl Connection {
             username: username.unwrap_or("").to_string(),
             password: password.unwrap_or("").to_string(),
             tenant_id: None,
-            client_name: String::new(),
-            client_version: String::new(),
-            wanted_conformance: String::new(),
+            client_name: hello_name.to_string(),
+            client_version: hello_ver.to_string(),
+            wanted_conformance: conformance.to_string(),
         };
         let msg = proto::QuicClientMessage {
             msg: Some(proto::quic_client_message::Msg::Hello(hello_req)),
@@ -1042,12 +1045,13 @@ impl Connection {
 
         // Wait for HELLO response (length-prefixed protobuf)
         let mut length_buf = [0u8; 4];
-        timeout(Duration::from_secs(5), recv.read_exact(&mut length_buf))
-            .await
-            .map_err(|_| Error::connection("HELLO response timeout"))?
-            .map_err(|e| {
-                Error::connection(format!("Failed to read HELLO response length: {}", e))
-            })?;
+        timeout(
+            Duration::from_secs(hello_timeout_secs),
+            recv.read_exact(&mut length_buf),
+        )
+        .await
+        .map_err(|_| Error::connection("HELLO response timeout"))?
+        .map_err(|e| Error::connection(format!("Failed to read HELLO response length: {}", e)))?;
 
         let msg_len = u32::from_be_bytes(length_buf) as usize;
 
@@ -1092,6 +1096,7 @@ impl Connection {
                 session_id,
             },
             page_size,
+            in_transaction: false,
         })
     }
 
@@ -1150,7 +1155,7 @@ impl Connection {
     async fn try_read_proto_quic(
         recv: &mut quinn::RecvStream,
     ) -> Result<Option<proto::QuicServerMessage>> {
-        let read_result = timeout(Duration::from_millis(5000), async {
+        let read_result = timeout(Duration::from_millis(500), async {
             let mut length_buf = [0u8; 4];
             recv.read_exact(&mut length_buf)
                 .await
@@ -1186,9 +1191,9 @@ impl Connection {
         proto_rows: &[proto::Row],
         columns: &[Column],
     ) -> Result<Vec<HashMap<String, Value>>> {
-        let mut rows = Vec::new();
+        let mut rows = Vec::with_capacity(proto_rows.len());
         for proto_row in proto_rows {
-            let mut row = HashMap::new();
+            let mut row = HashMap::with_capacity(columns.len());
             for (i, col) in columns.iter().enumerate() {
                 let value = if i < proto_row.values.len() {
                     Self::convert_proto_value_static(&proto_row.values[i])
@@ -1763,7 +1768,7 @@ impl Connection {
     /// # }
     /// ```
     pub async fn begin(&mut self) -> Result<()> {
-        match &mut self.kind {
+        let result = match &mut self.kind {
             ConnectionKind::Quic {
                 send,
                 recv,
@@ -1772,7 +1777,11 @@ impl Connection {
             } => Self::send_begin_quic(send, recv, session_id).await,
             #[cfg(feature = "grpc")]
             ConnectionKind::Grpc { client } => client.begin().await,
+        };
+        if result.is_ok() {
+            self.in_transaction = true;
         }
+        result
     }
 
     /// Commit the current transaction.
@@ -1798,7 +1807,7 @@ impl Connection {
     /// # }
     /// ```
     pub async fn commit(&mut self) -> Result<()> {
-        match &mut self.kind {
+        let result = match &mut self.kind {
             ConnectionKind::Quic {
                 send,
                 recv,
@@ -1807,7 +1816,11 @@ impl Connection {
             } => Self::send_commit_quic(send, recv, session_id).await,
             #[cfg(feature = "grpc")]
             ConnectionKind::Grpc { client } => client.commit().await,
+        };
+        if result.is_ok() {
+            self.in_transaction = false;
         }
+        result
     }
 
     /// Rollback the current transaction.
@@ -1834,7 +1847,7 @@ impl Connection {
     /// # }
     /// ```
     pub async fn rollback(&mut self) -> Result<()> {
-        match &mut self.kind {
+        let result = match &mut self.kind {
             ConnectionKind::Quic {
                 send,
                 recv,
@@ -1843,7 +1856,11 @@ impl Connection {
             } => Self::send_rollback_quic(send, recv, session_id).await,
             #[cfg(feature = "grpc")]
             ConnectionKind::Grpc { client } => client.rollback().await,
+        };
+        if result.is_ok() {
+            self.in_transaction = false;
         }
+        result
     }
 
     /// Create a prepared statement for efficient repeated execution.
@@ -2137,6 +2154,15 @@ impl Connection {
     ///     let (page, _) = conn.query("RETURN 1").await?;
     /// }
     /// ```
+    /// Returns whether this connection is currently inside a transaction.
+    ///
+    /// This is set to `true` after a successful [`begin`](Connection::begin) and
+    /// reset to `false` after a successful [`commit`](Connection::commit) or
+    /// [`rollback`](Connection::rollback).
+    pub fn in_transaction(&self) -> bool {
+        self.in_transaction
+    }
+
     pub fn is_healthy(&self) -> bool {
         match &self.kind {
             ConnectionKind::Quic { conn, .. } => {

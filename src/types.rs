@@ -67,6 +67,7 @@ pub struct Value {
 
 impl Value {
     /// Create a NULL value
+    #[inline]
     pub fn null() -> Self {
         Self {
             kind: ValueKind::Null,
@@ -86,6 +87,7 @@ impl Value {
     }
 
     /// Create an INT value
+    #[inline]
     pub fn int(value: i64) -> Self {
         Self {
             kind: ValueKind::Int,
@@ -95,6 +97,7 @@ impl Value {
     }
 
     /// Create a BOOL value
+    #[inline]
     pub fn bool(value: bool) -> Self {
         Self {
             kind: ValueKind::Bool,
@@ -104,6 +107,7 @@ impl Value {
     }
 
     /// Create a STRING value
+    #[inline]
     pub fn string<S: Into<String>>(value: S) -> Self {
         Self {
             kind: ValueKind::String,
@@ -113,6 +117,7 @@ impl Value {
     }
 
     /// Create a DECIMAL value
+    #[inline]
     pub fn decimal(value: Decimal) -> Self {
         Self {
             kind: ValueKind::Decimal,
@@ -122,6 +127,7 @@ impl Value {
     }
 
     /// Create an ARRAY value
+    #[inline]
     pub fn array(values: Vec<Value>) -> Self {
         Self {
             kind: ValueKind::Array,
@@ -131,6 +137,7 @@ impl Value {
     }
 
     /// Create an OBJECT value
+    #[inline]
     pub fn object(values: HashMap<String, Value>) -> Self {
         Self {
             kind: ValueKind::Object,
@@ -140,11 +147,13 @@ impl Value {
     }
 
     /// Check if value is NULL
+    #[inline]
     pub fn is_null(&self) -> bool {
         self.kind == ValueKind::Null
     }
 
     /// Get as integer
+    #[inline]
     pub fn as_int(&self) -> Result<i64> {
         if self.kind == ValueKind::Int {
             Ok(self.int_value)
@@ -157,6 +166,7 @@ impl Value {
     }
 
     /// Get as boolean
+    #[inline]
     pub fn as_bool(&self) -> Result<bool> {
         if self.kind == ValueKind::Bool {
             Ok(self.bool_value)
@@ -169,6 +179,7 @@ impl Value {
     }
 
     /// Get as string
+    #[inline]
     pub fn as_string(&self) -> Result<&str> {
         match self.kind {
             ValueKind::String
@@ -188,6 +199,7 @@ impl Value {
     }
 
     /// Get as decimal
+    #[inline]
     pub fn as_decimal(&self) -> Result<Decimal> {
         if self.kind == ValueKind::Decimal {
             self.decimal_value
@@ -201,6 +213,7 @@ impl Value {
     }
 
     /// Get as array
+    #[inline]
     pub fn as_array(&self) -> Result<&[Value]> {
         if self.kind == ValueKind::Array {
             Ok(&self.array_value)
@@ -213,6 +226,7 @@ impl Value {
     }
 
     /// Get as object
+    #[inline]
     pub fn as_object(&self) -> Result<&HashMap<String, Value>> {
         if self.kind == ValueKind::Object {
             Ok(&self.object_value)

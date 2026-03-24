@@ -141,6 +141,7 @@ impl Error {
     /// - Timeout errors
     /// - QUIC errors (connection reset, etc.)
     /// - Query errors with serialization failure codes (40001, 40P01)
+    #[inline]
     pub fn is_retryable(&self) -> bool {
         match self {
             Error::Connection(_) => true,

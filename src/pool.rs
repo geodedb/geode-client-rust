@@ -125,12 +125,16 @@ impl PooledConnection {
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
-        if let Some(conn) = self.connection.take() {
+        if let Some(mut conn) = self.connection.take() {
             // Only return healthy connections to the pool
             // Stale connections are dropped, cleaning up their resources
             if conn.is_healthy() {
                 let pool = self.pool.clone();
                 tokio::spawn(async move {
+                    // Best-effort rollback if the connection was left in a transaction
+                    if conn.in_transaction() {
+                        let _ = conn.rollback().await;
+                    }
                     let mut connections = pool.lock().await;
                     connections.push(conn);
                 });

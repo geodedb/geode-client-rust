@@ -309,7 +309,10 @@ impl Dsn {
                 "tls" => {
                     self.tls_enabled = parse_bool(value).unwrap_or(true);
                 }
-                "insecure_tls_skip_verify" | "insecure" | "skip_verify" => {
+                "insecure_tls_skip_verify"
+                | "insecure"
+                | "skip_verify"
+                | "insecure_skip_verify" => {
                     self.skip_verify = parse_bool(value).unwrap_or(false);
                 }
                 "page_size" => {
@@ -822,6 +825,22 @@ mod tests {
 
         let dsn = Dsn::parse("quic://localhost:3141?skip_verify=on").unwrap();
         assert!(dsn.skip_verify());
+    }
+
+    #[test]
+    fn test_dsn_parse_insecure_skip_verify_alias() {
+        // Alias: insecure_skip_verify
+        let dsn = Dsn::parse("quic://localhost:3141?insecure_skip_verify=true").unwrap();
+        assert!(dsn.skip_verify());
+
+        let dsn = Dsn::parse("grpc://localhost:50051?insecure_skip_verify=1").unwrap();
+        assert!(dsn.skip_verify());
+
+        let dsn = Dsn::parse("localhost:3141?insecure_skip_verify=on").unwrap();
+        assert!(dsn.skip_verify());
+
+        let dsn = Dsn::parse("quic://localhost:3141?insecure_skip_verify=false").unwrap();
+        assert!(!dsn.skip_verify());
     }
 
     #[test]
