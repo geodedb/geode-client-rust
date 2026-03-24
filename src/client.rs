@@ -1375,6 +1375,60 @@ impl Connection {
         Ok(())
     }
 
+    /// Send SAVEPOINT command over QUIC.
+    async fn send_savepoint_quic(
+        send: &mut quinn::SendStream,
+        recv: &mut quinn::RecvStream,
+        session_id: &str,
+        name: &str,
+    ) -> Result<()> {
+        let msg = proto::QuicClientMessage {
+            msg: Some(proto::quic_client_message::Msg::Savepoint(
+                proto::SavepointRequest {
+                    name: name.to_string(),
+                    session_id: session_id.to_string(),
+                },
+            )),
+        };
+        Self::send_proto_quic(send, &msg).await?;
+
+        let resp = Self::read_proto_quic(recv, 5).await?;
+        if !matches!(
+            resp.msg,
+            Some(proto::quic_server_message::Msg::Savepoint(_))
+        ) {
+            return Err(Error::protocol("Expected SAVEPOINT response"));
+        }
+        Ok(())
+    }
+
+    /// Send ROLLBACK TO command over QUIC.
+    async fn send_rollback_to_quic(
+        send: &mut quinn::SendStream,
+        recv: &mut quinn::RecvStream,
+        session_id: &str,
+        name: &str,
+    ) -> Result<()> {
+        let msg = proto::QuicClientMessage {
+            msg: Some(proto::quic_client_message::Msg::RollbackTo(
+                proto::RollbackToRequest {
+                    name: name.to_string(),
+                    session_id: session_id.to_string(),
+                },
+            )),
+        };
+        Self::send_proto_quic(send, &msg).await?;
+
+        let resp = Self::read_proto_quic(recv, 5).await?;
+        if !matches!(
+            resp.msg,
+            Some(proto::quic_server_message::Msg::RollbackTo(_))
+        ) {
+            return Err(Error::protocol("Expected ROLLBACK_TO response"));
+        }
+        Ok(())
+    }
+
     /// Execute a GQL query without parameters.
     ///
     /// # Arguments
@@ -1861,6 +1915,97 @@ impl Connection {
             self.in_transaction = false;
         }
         result
+    }
+
+    /// Create a savepoint within the current transaction.
+    ///
+    /// Savepoints allow partial rollback of a transaction. You can roll back
+    /// to a savepoint without aborting the entire transaction.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The name for the savepoint
+    ///
+    /// # Returns
+    ///
+    /// A [`Savepoint`] that can be passed to [`rollback_to`](Connection::rollback_to).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server rejects the savepoint creation.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use geode_client::Client;
+    /// # async fn example() -> geode_client::Result<()> {
+    /// # let client = Client::new("localhost", 3141).skip_verify(true);
+    /// # let mut conn = client.connect().await?;
+    /// conn.begin().await?;
+    /// conn.query("CREATE (a:Node)").await?;
+    /// let sp = conn.savepoint("sp1").await?;
+    /// conn.query("CREATE (b:Node)").await?;
+    /// conn.rollback_to(&sp).await?;  // Undo only the second create
+    /// conn.commit().await?;  // First node is saved
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn savepoint(&mut self, name: &str) -> Result<Savepoint> {
+        match &mut self.kind {
+            ConnectionKind::Quic {
+                send,
+                recv,
+                session_id,
+                ..
+            } => Self::send_savepoint_quic(send, recv, session_id, name).await?,
+            #[cfg(feature = "grpc")]
+            ConnectionKind::Grpc { client } => client.savepoint(name).await?,
+        }
+        Ok(Savepoint {
+            name: name.to_string(),
+        })
+    }
+
+    /// Roll back to a previously created savepoint.
+    ///
+    /// Discards all changes made after the savepoint was created, but keeps
+    /// the transaction active and preserves changes made before the savepoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `savepoint` - The savepoint to roll back to
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server rejects the rollback.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use geode_client::Client;
+    /// # async fn example() -> geode_client::Result<()> {
+    /// # let client = Client::new("localhost", 3141).skip_verify(true);
+    /// # let mut conn = client.connect().await?;
+    /// conn.begin().await?;
+    /// let sp = conn.savepoint("sp1").await?;
+    /// conn.query("CREATE (n:Temp)").await?;
+    /// conn.rollback_to(&sp).await?;  // Undo the create
+    /// conn.commit().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn rollback_to(&mut self, savepoint: &Savepoint) -> Result<()> {
+        match &mut self.kind {
+            ConnectionKind::Quic {
+                send,
+                recv,
+                session_id,
+                ..
+            } => Self::send_rollback_to_quic(send, recv, session_id, &savepoint.name).await?,
+            #[cfg(feature = "grpc")]
+            ConnectionKind::Grpc { client } => client.rollback_to(&savepoint.name).await?,
+        }
+        Ok(())
     }
 
     /// Create a prepared statement for efficient repeated execution.

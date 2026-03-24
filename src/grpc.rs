@@ -311,6 +311,26 @@ impl GrpcClient {
         Ok(())
     }
 
+    /// Create a savepoint within the current transaction.
+    ///
+    /// Note: Savepoints are not yet supported via the gRPC service definition.
+    /// This method will return an error until the gRPC service is updated.
+    pub async fn savepoint(&mut self, _name: &str) -> Result<()> {
+        Err(Error::connection(
+            "savepoint is not yet supported via gRPC transport",
+        ))
+    }
+
+    /// Roll back to a previously created savepoint.
+    ///
+    /// Note: Rollback-to-savepoint is not yet supported via the gRPC service definition.
+    /// This method will return an error until the gRPC service is updated.
+    pub async fn rollback_to(&mut self, _name: &str) -> Result<()> {
+        Err(Error::connection(
+            "rollback_to is not yet supported via gRPC transport",
+        ))
+    }
+
     /// Send a ping request.
     pub async fn ping(&mut self) -> Result<bool> {
         let response = self
