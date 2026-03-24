@@ -527,162 +527,156 @@ fn decode_value_with_depth(
         return Ok(Value::null());
     }
 
-    let type_upper = type_name.to_uppercase();
-
-    match type_upper.as_str() {
-        "INT" => {
-            if let Some(n) = raw.as_i64() {
+    if type_name.eq_ignore_ascii_case("INT") {
+        if let Some(n) = raw.as_i64() {
+            Ok(Value::int(n))
+        } else if let Some(s) = raw.as_str() {
+            if let Ok(n) = s.parse::<i64>() {
                 Ok(Value::int(n))
-            } else if let Some(s) = raw.as_str() {
-                if let Ok(n) = s.parse::<i64>() {
-                    Ok(Value::int(n))
-                } else {
-                    Ok(Value::string(s))
-                }
             } else {
-                Ok(Value::string(raw.to_string()))
+                Ok(Value::string(s))
             }
+        } else {
+            Ok(Value::string(raw.to_string()))
         }
-        "DECIMAL" => {
-            let s = raw
-                .as_str()
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| raw.to_string());
+    } else if type_name.eq_ignore_ascii_case("DECIMAL") {
+        let s = raw
+            .as_str()
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| raw.to_string());
+        if let Ok(dec) = s.parse::<Decimal>() {
+            Ok(Value::decimal(dec))
+        } else {
+            Ok(Value::string(s))
+        }
+    } else if type_name.eq_ignore_ascii_case("BOOL") {
+        if let Some(b) = raw.as_bool() {
+            Ok(Value::bool(b))
+        } else if let Some(s) = raw.as_str() {
+            let lower = s.to_ascii_lowercase();
+            if lower == "true" {
+                Ok(Value::bool(true))
+            } else if lower == "false" {
+                Ok(Value::bool(false))
+            } else {
+                Ok(Value::string(s))
+            }
+        } else {
+            Ok(Value::string(raw.to_string()))
+        }
+    } else if type_name.eq_ignore_ascii_case("STRING") {
+        Ok(Value::string(raw.as_str().unwrap_or("")))
+    } else if type_name.eq_ignore_ascii_case("BYTEA") {
+        let s = raw.as_str().unwrap_or("");
+        let bytes = if let Some(hex_str) = s.strip_prefix("\\x") {
+            hex::decode(hex_str).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        Ok(Value {
+            kind: ValueKind::Bytea,
+            bytes_value: bytes,
+            string_value: s.to_string(),
+            ..Value::null()
+        })
+    } else if type_name.eq_ignore_ascii_case("JSON") {
+        Ok(Value {
+            kind: ValueKind::Json,
+            string_value: raw.to_string(),
+            ..Value::null()
+        })
+    } else if type_name.eq_ignore_ascii_case("JSONB") {
+        Ok(Value {
+            kind: ValueKind::Jsonb,
+            string_value: raw.to_string(),
+            ..Value::null()
+        })
+    } else if type_name.eq_ignore_ascii_case("DATE") {
+        let s = raw.as_str().unwrap_or("");
+        let date = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok();
+        Ok(Value {
+            kind: ValueKind::Date,
+            string_value: s.to_string(),
+            date_value: date,
+            ..Value::null()
+        })
+    } else if type_name.eq_ignore_ascii_case("TIMESTAMP")
+        || type_name.eq_ignore_ascii_case("TIMESTAMPTZ")
+    {
+        let s = raw.as_str().unwrap_or("");
+        let timestamp = DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc));
+        let kind = if type_name.eq_ignore_ascii_case("TIMESTAMPTZ") {
+            ValueKind::TimestampTz
+        } else {
+            ValueKind::Timestamp
+        };
+        Ok(Value {
+            kind,
+            string_value: s.to_string(),
+            timestamp_value: timestamp,
+            ..Value::null()
+        })
+    } else if type_name.to_ascii_uppercase().contains("RANGE") {
+        if let Some(obj) = raw.as_object() {
+            let range = Range {
+                lower: obj.get("lower").and_then(|v| {
+                    decode_value_with_depth(v, "", depth + 1, max_depth)
+                        .ok()
+                        .map(Box::new)
+                }),
+                upper: obj.get("upper").and_then(|v| {
+                    decode_value_with_depth(v, "", depth + 1, max_depth)
+                        .ok()
+                        .map(Box::new)
+                }),
+                bounds: obj
+                    .get("bounds")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            };
+            Ok(Value {
+                kind: ValueKind::Range,
+                range_value: Some(range),
+                ..Value::null()
+            })
+        } else {
+            Ok(Value::string(raw.to_string()))
+        }
+    } else {
+        // Handle arrays and objects generically
+        if let Some(arr) = raw.as_array() {
+            let values: Result<Vec<_>> = arr
+                .iter()
+                .map(|v| decode_value_with_depth(v, "", depth + 1, max_depth))
+                .collect();
+            Ok(Value::array(values?))
+        } else if let Some(obj) = raw.as_object() {
+            let mut map = HashMap::new();
+            for (k, v) in obj {
+                map.insert(
+                    k.clone(),
+                    decode_value_with_depth(v, "", depth + 1, max_depth)?,
+                );
+            }
+            Ok(Value::object(map))
+        } else if let Some(b) = raw.as_bool() {
+            Ok(Value::bool(b))
+        } else if let Some(n) = raw.as_i64() {
+            Ok(Value::int(n))
+        } else if let Some(f) = raw.as_f64() {
+            let s = f.to_string();
             if let Ok(dec) = s.parse::<Decimal>() {
                 Ok(Value::decimal(dec))
             } else {
                 Ok(Value::string(s))
             }
-        }
-        "BOOL" => {
-            if let Some(b) = raw.as_bool() {
-                Ok(Value::bool(b))
-            } else if let Some(s) = raw.as_str() {
-                let lower = s.to_ascii_lowercase();
-                if lower == "true" {
-                    Ok(Value::bool(true))
-                } else if lower == "false" {
-                    Ok(Value::bool(false))
-                } else {
-                    Ok(Value::string(s))
-                }
-            } else {
-                Ok(Value::string(raw.to_string()))
-            }
-        }
-        "STRING" => Ok(Value::string(raw.as_str().unwrap_or(""))),
-        "BYTEA" => {
-            let s = raw.as_str().unwrap_or("");
-            let bytes = if let Some(hex_str) = s.strip_prefix("\\x") {
-                hex::decode(hex_str).unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            Ok(Value {
-                kind: ValueKind::Bytea,
-                bytes_value: bytes,
-                string_value: s.to_string(),
-                ..Value::null()
-            })
-        }
-        "JSON" => Ok(Value {
-            kind: ValueKind::Json,
-            string_value: raw.to_string(),
-            ..Value::null()
-        }),
-        "JSONB" => Ok(Value {
-            kind: ValueKind::Jsonb,
-            string_value: raw.to_string(),
-            ..Value::null()
-        }),
-        "DATE" => {
-            let s = raw.as_str().unwrap_or("");
-            let date = NaiveDate::parse_from_str(s, "%Y-%m-%d").ok();
-            Ok(Value {
-                kind: ValueKind::Date,
-                string_value: s.to_string(),
-                date_value: date,
-                ..Value::null()
-            })
-        }
-        "TIMESTAMP" | "TIMESTAMPTZ" => {
-            let s = raw.as_str().unwrap_or("");
-            let timestamp = DateTime::parse_from_rfc3339(s)
-                .ok()
-                .map(|dt| dt.with_timezone(&Utc));
-            let kind = if type_upper == "TIMESTAMPTZ" {
-                ValueKind::TimestampTz
-            } else {
-                ValueKind::Timestamp
-            };
-            Ok(Value {
-                kind,
-                string_value: s.to_string(),
-                timestamp_value: timestamp,
-                ..Value::null()
-            })
-        }
-        _ if type_upper.contains("RANGE") => {
-            if let Some(obj) = raw.as_object() {
-                let range = Range {
-                    lower: obj.get("lower").and_then(|v| {
-                        decode_value_with_depth(v, "", depth + 1, max_depth)
-                            .ok()
-                            .map(Box::new)
-                    }),
-                    upper: obj.get("upper").and_then(|v| {
-                        decode_value_with_depth(v, "", depth + 1, max_depth)
-                            .ok()
-                            .map(Box::new)
-                    }),
-                    bounds: obj
-                        .get("bounds")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                };
-                Ok(Value {
-                    kind: ValueKind::Range,
-                    range_value: Some(range),
-                    ..Value::null()
-                })
-            } else {
-                Ok(Value::string(raw.to_string()))
-            }
-        }
-        _ => {
-            // Handle arrays and objects generically
-            if let Some(arr) = raw.as_array() {
-                let values: Result<Vec<_>> = arr
-                    .iter()
-                    .map(|v| decode_value_with_depth(v, "", depth + 1, max_depth))
-                    .collect();
-                Ok(Value::array(values?))
-            } else if let Some(obj) = raw.as_object() {
-                let mut map = HashMap::new();
-                for (k, v) in obj {
-                    map.insert(
-                        k.clone(),
-                        decode_value_with_depth(v, "", depth + 1, max_depth)?,
-                    );
-                }
-                Ok(Value::object(map))
-            } else if let Some(b) = raw.as_bool() {
-                Ok(Value::bool(b))
-            } else if let Some(n) = raw.as_i64() {
-                Ok(Value::int(n))
-            } else if let Some(f) = raw.as_f64() {
-                let s = f.to_string();
-                if let Ok(dec) = s.parse::<Decimal>() {
-                    Ok(Value::decimal(dec))
-                } else {
-                    Ok(Value::string(s))
-                }
-            } else if let Some(s) = raw.as_str() {
-                Ok(Value::string(s))
-            } else {
-                Ok(Value::string(raw.to_string()))
-            }
+        } else if let Some(s) = raw.as_str() {
+            Ok(Value::string(s))
+        } else {
+            Ok(Value::string(raw.to_string()))
         }
     }
 }
