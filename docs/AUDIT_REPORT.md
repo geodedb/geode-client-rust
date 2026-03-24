@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-24
 **Project:** geode-client-rust v0.1.1-alpha.20
-**Commit:** e9e2f69 (main, after gap closure)
+**Commit:** 59eb304 (main, after 2nd gap closure)
 **Platform:** GitLab
 **Languages:** Rust
 **Scope:** Entire repository
@@ -156,20 +156,35 @@
 | `5a4b4a6` | 6 | HELLO frame check, proto depth limit, Dsn Debug redaction, query/param validation, DSN timeout wiring, forbid(unsafe_code) |
 | `e9e2f69` | 7 | Dependency CVE updates (aws-lc-sys, quinn-proto, rustls-webpki) |
 
-**Total closed: 17 findings** (10 code fixes + 7 dependency updates)
+**Total closed: 26 findings** (19 code fixes + 7 dependency updates)
 
-### Remaining (not closed — require architectural changes or are deferred)
+### Round 2 closures (commit 59eb304)
+
+| Finding | Fix |
+|---------|-----|
+| A1: HELLO params ignored | Wired client_name, client_version, conformance, hello_timeout to server |
+| A2: try_read_proto_quic 5s timeout | Reduced to 500ms |
+| A8: Pool transaction leak | Added in_transaction tracking + rollback-on-drop |
+| A9: Dockerfile rust:1.83 | Updated to rust:1.85 |
+| A11: No #[inline] annotations | Added to 14 Value functions + is_retryable |
+| A16: DSN insecure_skip_verify alias | Added to match arms |
+| Perf: No with_capacity | Added Vec/HashMap preallocation in row parsing |
+| Perf: tokio "full" | Narrowed to selective features |
+| Perf: No [profile.release] | Added lto="thin", codegen-units=1 |
+
+### Remaining (require architectural changes or server testing)
 
 | Finding | Domain | Reason |
 |---------|--------|--------|
 | savepoint()/rollback_to() missing | Gap | Requires new proto message implementation |
-| client.rs 2666 lines | Quality | Major refactoring effort |
-| Value struct ~240 bytes | Perf | Breaking API change (enum redesign) |
-| HELLO params ignored | Quality | Requires protocol testing against server |
+| client.rs 2695 lines | Quality | Major refactoring effort |
+| Value struct ~250 bytes | Perf | Breaking API change (enum redesign) |
 | QueryBuilder type mismatch | Quality | Breaking API change |
+| type_name.to_uppercase() per cell | Perf | Requires decode_value refactor |
 | README examples wrong signatures | Gap | Docs-only, deferred |
 | gRPC connection pool support | Gap | Architecture change |
 | Decimal precision loss in to_proto_value | Quality | Requires proto schema analysis |
+| AuthClient empty stub | Gap | Requires server protocol support |
 
 ## Blockers
 
