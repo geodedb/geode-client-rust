@@ -18,6 +18,13 @@ use crate::types::Value;
 use crate::validate;
 
 const GEODE_ALPN: &[u8] = b"geode/1";
+/// Maximum size of a single protobuf response frame in bytes (8 MB).
+/// Prevents unbounded memory allocation from a malicious or buggy server (CWE-400).
+const MAX_PROTO_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum total rows to buffer across all pages for a single query.
+const DEFAULT_MAX_ROWS: usize = 1_000_000;
+/// Maximum number of pages to pull for a single query.
+const DEFAULT_MAX_PAGES: usize = 10_000;
 
 /// Redact password from a DSN string for safe inclusion in error messages.
 /// Handles both URL format (quic://user:pass@host) and query parameter format (?password=xxx).
@@ -1095,6 +1102,7 @@ impl Connection {
     /// Read a protobuf message over QUIC with timeout.
     /// Timeout covers the entire read (length prefix + body) to prevent
     /// hangs when large responses arrive slowly across multiple QUIC frames.
+    /// Enforces MAX_PROTO_FRAME_BYTES to prevent unbounded allocation (CWE-400).
     async fn read_proto_quic(
         recv: &mut quinn::RecvStream,
         timeout_secs: u64,
@@ -1107,6 +1115,15 @@ impl Connection {
                 .map_err(|e| Error::connection(format!("Failed to read response length: {}", e)))?;
 
             let msg_len = u32::from_be_bytes(length_buf) as usize;
+
+            // Enforce frame size limit to prevent unbounded memory allocation
+            if msg_len > MAX_PROTO_FRAME_BYTES {
+                return Err(Error::limit(format!(
+                    "Frame size {} bytes exceeds max {} bytes",
+                    msg_len, MAX_PROTO_FRAME_BYTES
+                )));
+            }
+
             let mut msg_buf = vec![0u8; msg_len];
             recv.read_exact(&mut msg_buf)
                 .await
@@ -1121,6 +1138,7 @@ impl Connection {
     /// Attempt to read a buffered protobuf message without blocking (QUIC).
     /// Returns Ok(None) if no complete message is available immediately.
     /// Timeout covers the entire read (length prefix + body).
+    /// Enforces MAX_PROTO_FRAME_BYTES to prevent unbounded allocation (CWE-400).
     async fn try_read_proto_quic(
         recv: &mut quinn::RecvStream,
     ) -> Result<Option<proto::QuicServerMessage>> {
@@ -1131,6 +1149,14 @@ impl Connection {
                 .map_err(|e| Error::connection(format!("Failed to read response: {}", e)))?;
 
             let msg_len = u32::from_be_bytes(length_buf) as usize;
+
+            if msg_len > MAX_PROTO_FRAME_BYTES {
+                return Err(Error::limit(format!(
+                    "Frame size {} bytes exceeds max {} bytes",
+                    msg_len, MAX_PROTO_FRAME_BYTES
+                )));
+            }
+
             let mut msg_buf = vec![0u8; msg_len];
             recv.read_exact(&mut msg_buf)
                 .await
@@ -1426,8 +1452,25 @@ impl Connection {
             let mut ordered = page.ordered;
             let mut order_keys = page.order_keys;
             let mut request_id: u64 = 0;
+            let mut page_count: usize = 1; // first page already fetched
 
             loop {
+                // Enforce row and page limits to prevent unbounded memory growth (CWE-400)
+                if all_rows.len() > DEFAULT_MAX_ROWS {
+                    return Err(Error::limit(format!(
+                        "Total rows {} exceeds max {}",
+                        all_rows.len(),
+                        DEFAULT_MAX_ROWS
+                    )));
+                }
+                page_count += 1;
+                if page_count > DEFAULT_MAX_PAGES {
+                    return Err(Error::limit(format!(
+                        "Page count {} exceeds max {}",
+                        page_count, DEFAULT_MAX_PAGES
+                    )));
+                }
+
                 request_id += 1;
                 let pull_req = proto::QuicClientMessage {
                     msg: Some(proto::quic_client_message::Msg::Pull(proto::PullRequest {
@@ -1645,13 +1688,11 @@ impl Connection {
         params: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<Page> {
         let params_map = params.unwrap_or_default();
-        let params_typed: HashMap<String, Value> = params_map
-            .into_iter()
-            .map(|(k, v)| {
-                let typed_val = crate::types::Value::from_json(v);
-                (k, typed_val)
-            })
-            .collect();
+        let mut params_typed: HashMap<String, Value> = HashMap::new();
+        for (k, v) in params_map {
+            let typed_val = crate::types::Value::from_json(v)?;
+            params_typed.insert(k, typed_val);
+        }
 
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {

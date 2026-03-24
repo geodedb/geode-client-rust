@@ -6,6 +6,9 @@ use std::collections::HashMap;
 
 use crate::error::{Error, Result};
 
+/// Default maximum JSON nesting depth when decoding values
+pub const DEFAULT_MAX_JSON_DEPTH: usize = 64;
+
 /// Kind of value
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueKind {
@@ -415,39 +418,97 @@ impl Value {
         }
     }
 
-    /// Create a Value from a serde_json::Value
-    pub fn from_json(json: serde_json::Value) -> Self {
+    /// Create a Value from a serde_json::Value using the default depth limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the JSON nesting depth exceeds [`DEFAULT_MAX_JSON_DEPTH`].
+    pub fn from_json(json: serde_json::Value) -> Result<Self> {
+        Self::from_json_with_max_depth(json, DEFAULT_MAX_JSON_DEPTH)
+    }
+
+    /// Create a Value from a serde_json::Value with an explicit depth limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the JSON nesting depth exceeds `max_depth`.
+    pub fn from_json_with_max_depth(json: serde_json::Value, max_depth: usize) -> Result<Self> {
+        Self::from_json_with_depth(json, 0, max_depth)
+    }
+
+    fn from_json_with_depth(
+        json: serde_json::Value,
+        depth: usize,
+        max_depth: usize,
+    ) -> Result<Self> {
+        if depth >= max_depth {
+            return Err(Error::limit(format!(
+                "JSON nesting depth {} exceeds max {}",
+                depth, max_depth
+            )));
+        }
+
         match json {
-            serde_json::Value::Null => Self::null(),
-            serde_json::Value::Bool(b) => Self::bool(b),
+            serde_json::Value::Null => Ok(Self::null()),
+            serde_json::Value::Bool(b) => Ok(Self::bool(b)),
             serde_json::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
-                    Self::int(i)
+                    Ok(Self::int(i))
                 } else if let Some(f) = n.as_f64() {
                     // Try to convert to decimal
-                    Self::string(f.to_string())
+                    Ok(Self::string(f.to_string()))
                 } else {
-                    Self::null()
+                    Ok(Self::null())
                 }
             }
-            serde_json::Value::String(s) => Self::string(s),
+            serde_json::Value::String(s) => Ok(Self::string(s)),
             serde_json::Value::Array(arr) => {
-                let values: Vec<Value> = arr.into_iter().map(Self::from_json).collect();
-                Self::array(values)
+                let values: Result<Vec<Value>> = arr
+                    .into_iter()
+                    .map(|v| Self::from_json_with_depth(v, depth + 1, max_depth))
+                    .collect();
+                Ok(Self::array(values?))
             }
             serde_json::Value::Object(obj) => {
                 let mut map = HashMap::new();
                 for (k, v) in obj {
-                    map.insert(k, Self::from_json(v));
+                    map.insert(k, Self::from_json_with_depth(v, depth + 1, max_depth)?);
                 }
-                Self::object(map)
+                Ok(Self::object(map))
             }
         }
     }
 }
 
-/// Decode a JSON value into a typed Value object
+/// Decode a JSON value into a typed Value object using the default depth limit.
+///
+/// Returns an error if the JSON nesting depth exceeds [`DEFAULT_MAX_JSON_DEPTH`].
 pub fn decode_value(raw: &serde_json::Value, type_name: &str) -> Result<Value> {
+    decode_value_with_max_depth(raw, type_name, DEFAULT_MAX_JSON_DEPTH)
+}
+
+/// Decode a JSON value into a typed Value object with a specific depth limit.
+pub fn decode_value_with_max_depth(
+    raw: &serde_json::Value,
+    type_name: &str,
+    max_depth: usize,
+) -> Result<Value> {
+    decode_value_with_depth(raw, type_name, 0, max_depth)
+}
+
+fn decode_value_with_depth(
+    raw: &serde_json::Value,
+    type_name: &str,
+    depth: usize,
+    max_depth: usize,
+) -> Result<Value> {
+    if depth >= max_depth {
+        return Err(Error::limit(format!(
+            "JSON nesting depth {} exceeds max {}",
+            depth, max_depth
+        )));
+    }
+
     if raw.is_null() {
         return Ok(Value::null());
     }
@@ -550,12 +611,16 @@ pub fn decode_value(raw: &serde_json::Value, type_name: &str) -> Result<Value> {
         _ if type_upper.contains("RANGE") => {
             if let Some(obj) = raw.as_object() {
                 let range = Range {
-                    lower: obj
-                        .get("lower")
-                        .and_then(|v| decode_value(v, "").ok().map(Box::new)),
-                    upper: obj
-                        .get("upper")
-                        .and_then(|v| decode_value(v, "").ok().map(Box::new)),
+                    lower: obj.get("lower").and_then(|v| {
+                        decode_value_with_depth(v, "", depth + 1, max_depth)
+                            .ok()
+                            .map(Box::new)
+                    }),
+                    upper: obj.get("upper").and_then(|v| {
+                        decode_value_with_depth(v, "", depth + 1, max_depth)
+                            .ok()
+                            .map(Box::new)
+                    }),
                     bounds: obj
                         .get("bounds")
                         .and_then(|v| v.as_str())
@@ -574,12 +639,18 @@ pub fn decode_value(raw: &serde_json::Value, type_name: &str) -> Result<Value> {
         _ => {
             // Handle arrays and objects generically
             if let Some(arr) = raw.as_array() {
-                let values: Result<Vec<_>> = arr.iter().map(|v| decode_value(v, "")).collect();
+                let values: Result<Vec<_>> = arr
+                    .iter()
+                    .map(|v| decode_value_with_depth(v, "", depth + 1, max_depth))
+                    .collect();
                 Ok(Value::array(values?))
             } else if let Some(obj) = raw.as_object() {
                 let mut map = HashMap::new();
                 for (k, v) in obj {
-                    map.insert(k.clone(), decode_value(v, "")?);
+                    map.insert(
+                        k.clone(),
+                        decode_value_with_depth(v, "", depth + 1, max_depth)?,
+                    );
                 }
                 Ok(Value::object(map))
             } else if let Some(b) = raw.as_bool() {
@@ -1058,45 +1129,45 @@ mod tests {
 
     #[test]
     fn test_from_json_null() {
-        let v = Value::from_json(json!(null));
+        let v = Value::from_json(json!(null)).unwrap();
         assert!(v.is_null());
     }
 
     #[test]
     fn test_from_json_bool() {
-        let v = Value::from_json(json!(true));
+        let v = Value::from_json(json!(true)).unwrap();
         assert!(v.as_bool().unwrap());
     }
 
     #[test]
     fn test_from_json_int() {
-        let v = Value::from_json(json!(42));
+        let v = Value::from_json(json!(42)).unwrap();
         assert_eq!(v.as_int().unwrap(), 42);
     }
 
     #[test]
     fn test_from_json_float() {
-        let v = Value::from_json(json!(1.5));
+        let v = Value::from_json(json!(1.5)).unwrap();
         // Floats are converted to strings
         assert_eq!(v.kind, ValueKind::String);
     }
 
     #[test]
     fn test_from_json_string() {
-        let v = Value::from_json(json!("hello"));
+        let v = Value::from_json(json!("hello")).unwrap();
         assert_eq!(v.as_string().unwrap(), "hello");
     }
 
     #[test]
     fn test_from_json_array() {
-        let v = Value::from_json(json!([1, 2, 3]));
+        let v = Value::from_json(json!([1, 2, 3])).unwrap();
         let arr = v.as_array().unwrap();
         assert_eq!(arr.len(), 3);
     }
 
     #[test]
     fn test_from_json_object() {
-        let v = Value::from_json(json!({"name": "Alice"}));
+        let v = Value::from_json(json!({"name": "Alice"})).unwrap();
         let obj = v.as_object().unwrap();
         assert_eq!(obj.get("name").unwrap().as_string().unwrap(), "Alice");
     }
@@ -1108,10 +1179,36 @@ mod tests {
                 {"name": "Alice", "age": 30},
                 {"name": "Bob", "age": 25}
             ]
-        }));
+        }))
+        .unwrap();
         let obj = v.as_object().unwrap();
         let users = obj.get("users").unwrap().as_array().unwrap();
         assert_eq!(users.len(), 2);
+    }
+
+    #[test]
+    fn test_from_json_depth_limit() {
+        // Build deeply nested JSON: {"a":{"a":{"a":...}}}
+        let mut json = serde_json::Value::Null;
+        for _ in 0..70 {
+            let mut obj = serde_json::Map::new();
+            obj.insert("a".to_string(), json);
+            json = serde_json::Value::Object(obj);
+        }
+        // Default depth limit is 64, so 70 levels should fail
+        let result = Value::from_json(json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("depth"));
+    }
+
+    #[test]
+    fn test_from_json_within_depth_limit() {
+        // Build JSON nested to exactly 60 levels (under default 64 limit)
+        let mut json = serde_json::Value::Bool(true);
+        for _ in 0..60 {
+            json = serde_json::Value::Array(vec![json]);
+        }
+        assert!(Value::from_json(json).is_ok());
     }
 
     // ==================== decode_value Tests ====================
@@ -1392,7 +1489,7 @@ mod tests {
     fn test_json_roundtrip_int() {
         let original = Value::int(42);
         let json = original.to_json();
-        let restored = Value::from_json(json);
+        let restored = Value::from_json(json).unwrap();
         assert_eq!(restored.as_int().unwrap(), 42);
     }
 
@@ -1400,7 +1497,7 @@ mod tests {
     fn test_json_roundtrip_string() {
         let original = Value::string("hello world");
         let json = original.to_json();
-        let restored = Value::from_json(json);
+        let restored = Value::from_json(json).unwrap();
         assert_eq!(restored.as_string().unwrap(), "hello world");
     }
 
@@ -1408,7 +1505,7 @@ mod tests {
     fn test_json_roundtrip_bool() {
         let original = Value::bool(true);
         let json = original.to_json();
-        let restored = Value::from_json(json);
+        let restored = Value::from_json(json).unwrap();
         assert!(restored.as_bool().unwrap());
     }
 
@@ -1416,7 +1513,7 @@ mod tests {
     fn test_json_roundtrip_array() {
         let original = Value::array(vec![Value::int(1), Value::string("two")]);
         let json = original.to_json();
-        let restored = Value::from_json(json);
+        let restored = Value::from_json(json).unwrap();
         let arr = restored.as_array().unwrap();
         assert_eq!(arr[0].as_int().unwrap(), 1);
         assert_eq!(arr[1].as_string().unwrap(), "two");
@@ -1429,7 +1526,7 @@ mod tests {
         map.insert("age".to_string(), Value::int(30));
         let original = Value::object(map);
         let json = original.to_json();
-        let restored = Value::from_json(json);
+        let restored = Value::from_json(json).unwrap();
         let obj = restored.as_object().unwrap();
         assert_eq!(obj.get("name").unwrap().as_string().unwrap(), "Alice");
         assert_eq!(obj.get("age").unwrap().as_int().unwrap(), 30);
@@ -1439,7 +1536,7 @@ mod tests {
     fn test_json_roundtrip_null() {
         let original = Value::null();
         let json = original.to_json();
-        let restored = Value::from_json(json);
+        let restored = Value::from_json(json).unwrap();
         assert!(restored.is_null());
     }
 

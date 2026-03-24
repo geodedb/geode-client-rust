@@ -56,6 +56,10 @@ pub enum Error {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    /// Client-side limit exceeded (frame size, rows, depth, etc.)
+    #[error("Limit exceeded: {0}")]
+    Limit(String),
+
     /// Generic error
     #[error("{0}")]
     Other(String),
@@ -118,6 +122,11 @@ impl Error {
     /// Create a validation error
     pub fn validation<S: Into<String>>(msg: S) -> Self {
         Error::Validation(msg.into())
+    }
+
+    /// Create a client limit error
+    pub fn limit<S: Into<String>>(msg: S) -> Self {
+        Error::Limit(msg.into())
     }
 
     /// Create an invalid DSN error
@@ -232,6 +241,12 @@ mod tests {
     }
 
     #[test]
+    fn test_error_display_limit() {
+        let err = Error::Limit("frame too large".to_string());
+        assert_eq!(err.to_string(), "Limit exceeded: frame too large");
+    }
+
+    #[test]
     fn test_error_display_other() {
         let err = Error::Other("unknown error".to_string());
         assert_eq!(err.to_string(), "unknown error");
@@ -310,6 +325,12 @@ mod tests {
     fn test_error_helper_pool() {
         let err = Error::pool("no connections available");
         assert!(matches!(err, Error::Pool(msg) if msg == "no connections available"));
+    }
+
+    #[test]
+    fn test_error_helper_limit() {
+        let err = Error::limit("max rows exceeded");
+        assert!(matches!(err, Error::Limit(msg) if msg == "max rows exceeded"));
     }
 
     #[test]

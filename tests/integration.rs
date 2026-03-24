@@ -1214,7 +1214,7 @@ async fn test_docker_query_builder() {
     // Convert serde_json params to Value params
     let mut params = HashMap::new();
     for (k, v) in json_params {
-        params.insert(k, Value::from_json(v));
+        params.insert(k, Value::from_json(v).unwrap());
     }
 
     let (page, _) = conn.query_with_params(&query, &params).await.unwrap();

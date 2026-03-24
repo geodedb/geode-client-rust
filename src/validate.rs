@@ -14,6 +14,12 @@ pub const MAX_PARAM_NAME_LENGTH: usize = 128;
 /// Maximum allowed hostname length
 pub const MAX_HOSTNAME_LENGTH: usize = 253;
 
+/// Minimum allowed frame size in bytes
+pub const MIN_FRAME_BYTES: usize = 1;
+
+/// Minimum allowed JSON depth
+pub const MIN_JSON_DEPTH: usize = 1;
+
 /// Validate a GQL query string.
 ///
 /// # Validation Rules
@@ -280,6 +286,50 @@ pub fn page_size(size: usize) -> Result<()> {
     Ok(())
 }
 
+/// Validate a maximum frame size.
+///
+/// # Validation Rules
+/// - Must be at least MIN_FRAME_BYTES
+pub fn max_frame_bytes(size: usize) -> Result<()> {
+    if size < MIN_FRAME_BYTES {
+        return Err(Error::validation("Max frame size must be at least 1 byte"));
+    }
+    Ok(())
+}
+
+/// Validate a maximum rows limit.
+///
+/// # Validation Rules
+/// - Must be at least 1
+pub fn max_rows(rows: usize) -> Result<()> {
+    if rows == 0 {
+        return Err(Error::validation("Max rows must be at least 1"));
+    }
+    Ok(())
+}
+
+/// Validate a maximum pages limit.
+///
+/// # Validation Rules
+/// - Must be at least 1
+pub fn max_pages(pages: usize) -> Result<()> {
+    if pages == 0 {
+        return Err(Error::validation("Max pages must be at least 1"));
+    }
+    Ok(())
+}
+
+/// Validate maximum JSON depth.
+///
+/// # Validation Rules
+/// - Must be at least MIN_JSON_DEPTH
+pub fn max_json_depth(depth: usize) -> Result<()> {
+    if depth < MIN_JSON_DEPTH {
+        return Err(Error::validation("Max JSON depth must be at least 1"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +530,65 @@ mod tests {
         let result = page_size(100_001);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("100,000"));
+    }
+
+    // ==================== Max Frame Bytes Tests ====================
+
+    #[test]
+    fn test_max_frame_bytes_valid() {
+        assert!(max_frame_bytes(1).is_ok());
+        assert!(max_frame_bytes(1024).is_ok());
+    }
+
+    #[test]
+    fn test_max_frame_bytes_zero() {
+        let result = max_frame_bytes(0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Max frame size"));
+    }
+
+    // ==================== Max Rows Tests ====================
+
+    #[test]
+    fn test_max_rows_valid() {
+        assert!(max_rows(1).is_ok());
+        assert!(max_rows(10_000).is_ok());
+    }
+
+    #[test]
+    fn test_max_rows_zero() {
+        let result = max_rows(0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Max rows"));
+    }
+
+    // ==================== Max Pages Tests ====================
+
+    #[test]
+    fn test_max_pages_valid() {
+        assert!(max_pages(1).is_ok());
+        assert!(max_pages(100).is_ok());
+    }
+
+    #[test]
+    fn test_max_pages_zero() {
+        let result = max_pages(0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Max pages"));
+    }
+
+    // ==================== Max JSON Depth Tests ====================
+
+    #[test]
+    fn test_max_json_depth_valid() {
+        assert!(max_json_depth(1).is_ok());
+        assert!(max_json_depth(64).is_ok());
+    }
+
+    #[test]
+    fn test_max_json_depth_zero() {
+        let result = max_json_depth(0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Max JSON depth"));
     }
 }

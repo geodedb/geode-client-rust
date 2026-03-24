@@ -161,7 +161,7 @@ proptest! {
     #[test]
     fn from_json_never_panics(json_str in "\\{.*\\}|\\[.*\\]|\".*\"|[0-9]+|true|false|null") {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
-            let _ = Value::from_json(json);
+            let _ = Value::from_json(json); // may return Err for deep nesting, that's ok
         }
     }
 
@@ -170,7 +170,7 @@ proptest! {
     fn simple_json_roundtrip(i in any::<i64>()) {
         let original = Value::int(i);
         let json = original.to_json();
-        let restored = Value::from_json(json);
+        let restored = Value::from_json(json).unwrap();
         // Int should come back as int
         prop_assert!(!restored.is_null());
         prop_assert!(restored.as_int().is_ok());

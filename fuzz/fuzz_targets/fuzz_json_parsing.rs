@@ -14,12 +14,12 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
         // Try to parse as JSON
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(s) {
-            // Test from_json
-            let value = Value::from_json(json.clone());
-
-            // Test to_json roundtrip
-            let back = value.to_json();
-            let _ = Value::from_json(back);
+            // Test from_json (may return Err for deep nesting)
+            if let Ok(value) = Value::from_json(json.clone()) {
+                // Test to_json roundtrip
+                let back = value.to_json();
+                let _ = Value::from_json(back);
+            }
 
             // Test various Value constructors with string input
             let _ = Value::string(s);
