@@ -5,6 +5,7 @@
 //! Supports the following DSN formats:
 //! - `quic://host:port?options` - QUIC transport (recommended)
 //! - `grpc://host:port?options` - gRPC transport
+//! - `grpcs://host:port?options` - gRPC transport with TLS forced on
 //! - `host:port?options` - Defaults to QUIC
 //!
 //! # Examples
@@ -105,6 +106,7 @@ impl Dsn {
     ///
     /// - `quic://host:port?options` - QUIC transport (recommended)
     /// - `grpc://host:port?options` - gRPC transport
+    /// - `grpcs://host:port?options` - gRPC transport with TLS forced on
     /// - `host:port?options` - Defaults to QUIC
     ///
     /// # Supported options (query parameters)
@@ -149,13 +151,19 @@ impl Dsn {
         // Determine scheme and parse accordingly
         if dsn.starts_with("quic://") {
             Self::parse_url(dsn, Transport::Quic)
+        } else if let Some(rest) = dsn.strip_prefix("grpcs://") {
+            // grpcs:// is gRPC with TLS forced on
+            let rewritten = format!("grpc://{}", rest);
+            let mut result = Self::parse_url(&rewritten, Transport::Grpc)?;
+            result.tls_enabled = true;
+            Ok(result)
         } else if dsn.starts_with("grpc://") {
             Self::parse_url(dsn, Transport::Grpc)
         } else if dsn.contains("://") {
             // Unsupported scheme - reject it
             let scheme = dsn.split("://").next().unwrap_or("");
             Err(Error::invalid_dsn(format!(
-                "Unsupported scheme '{}'. Supported schemes: quic://, grpc://",
+                "Unsupported scheme '{}'. Supported schemes: quic://, grpc://, grpcs://",
                 scheme
             )))
         } else {
@@ -552,6 +560,23 @@ mod tests {
     fn test_dsn_parse_grpc_with_tls_false() {
         let dsn = Dsn::parse("grpc://localhost:50051?tls=false").unwrap();
         assert!(!dsn.tls_enabled());
+    }
+
+    #[test]
+    fn test_dsn_parse_grpcs_scheme() {
+        let dsn = Dsn::parse("grpcs://localhost:50051").unwrap();
+        assert_eq!(dsn.transport(), Transport::Grpc);
+        assert!(dsn.tls_enabled());
+        assert_eq!(dsn.host(), "localhost");
+        assert_eq!(dsn.port(), 50051);
+    }
+
+    #[test]
+    fn test_dsn_parse_grpcs_tls_forced() {
+        // Even if tls=0 is passed, grpcs:// forces TLS on
+        let dsn = Dsn::parse("grpcs://localhost:50051?tls=0").unwrap();
+        assert_eq!(dsn.transport(), Transport::Grpc);
+        assert!(dsn.tls_enabled());
     }
 
     #[test]
