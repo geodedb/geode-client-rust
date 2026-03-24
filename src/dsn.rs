@@ -53,7 +53,7 @@ impl std::fmt::Display for Transport {
 /// Parsed DSN (Data Source Name) for Geode connections.
 ///
 /// Contains all connection parameters extracted from a DSN string.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Dsn {
     transport: Transport,
     host: String,
@@ -449,6 +449,30 @@ impl Dsn {
         } else {
             format!("{}:{}", self.host, self.port)
         }
+    }
+}
+
+impl std::fmt::Debug for Dsn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Dsn")
+            .field("transport", &self.transport)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("tls_enabled", &self.tls_enabled)
+            .field("skip_verify", &self.skip_verify)
+            .field("page_size", &self.page_size)
+            .field("client_name", &self.client_name)
+            .field("client_version", &self.client_version)
+            .field("conformance", &self.conformance)
+            .field("ca_cert", &self.ca_cert)
+            .field("client_cert", &self.client_cert)
+            .field("client_key", &self.client_key)
+            .field("server_name", &self.server_name)
+            .field("connect_timeout_secs", &self.connect_timeout_secs)
+            .field("options", &self.options)
+            .finish()
     }
 }
 
@@ -871,6 +895,34 @@ mod tests {
             err_str.contains("Unsupported scheme") || err_str.contains("unsupported"),
             "Expected 'unsupported scheme' error, got: {}",
             err_str
+        );
+    }
+
+    // ==========================================================================
+    // Security Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_dsn_debug_redacts_password() {
+        let dsn = Dsn::parse("quic://user:secret@localhost:3141").unwrap();
+        let debug_str = format!("{:?}", dsn);
+        assert!(
+            !debug_str.contains("secret"),
+            "Debug output must not contain password"
+        );
+        assert!(
+            debug_str.contains("REDACTED"),
+            "Debug output must show REDACTED"
+        );
+    }
+
+    #[test]
+    fn test_dsn_debug_no_password_shows_none() {
+        let dsn = Dsn::parse("quic://localhost:3141").unwrap();
+        let debug_str = format!("{:?}", dsn);
+        assert!(
+            debug_str.contains("password: None"),
+            "Debug output should show None when no password is set"
         );
     }
 }

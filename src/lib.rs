@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Geode Rust Client Library
 //!
 //! A high-performance async Rust client for Geode graph database with full GQL support.

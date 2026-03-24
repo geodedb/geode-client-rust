@@ -209,8 +209,24 @@ impl GrpcClient {
         ))
     }
 
+    /// Maximum recursion depth for converting nested protobuf values (CWE-674).
+    const MAX_PROTO_RECURSION_DEPTH: usize = 64;
+
     /// Convert a proto Value to our Value type.
+    /// Delegates to the depth-limited variant starting at depth 0.
     fn convert_proto_value(proto_val: &proto::Value) -> Value {
+        Self::convert_proto_value_with_depth(proto_val, 0)
+    }
+
+    /// Depth-limited conversion of protobuf Value to our Value type.
+    /// Returns `Value::null()` when recursion exceeds `MAX_PROTO_RECURSION_DEPTH`
+    /// to prevent stack overflow from deeply nested or malicious payloads (CWE-674).
+    fn convert_proto_value_with_depth(proto_val: &proto::Value, depth: usize) -> Value {
+        if depth > Self::MAX_PROTO_RECURSION_DEPTH {
+            return Value::null();
+        }
+
+        let next_depth = depth + 1;
         use crate::proto::value::Kind;
         match &proto_val.kind {
             Some(Kind::StringVal(s)) => Value::string(s.value.clone()),
@@ -221,14 +237,21 @@ impl GrpcClient {
             Some(Kind::BoolVal(b)) => Value::bool(*b),
             Some(Kind::NullVal(_)) => Value::null(),
             Some(Kind::ListVal(list)) => {
-                let values = list.values.iter().map(Self::convert_proto_value).collect();
+                let values = list
+                    .values
+                    .iter()
+                    .map(|v| Self::convert_proto_value_with_depth(v, next_depth))
+                    .collect();
                 Value::array(values)
             }
             Some(Kind::MapVal(map)) => {
                 let mut obj = HashMap::new();
                 for entry in &map.entries {
                     if let Some(ref val) = entry.value {
-                        obj.insert(entry.key.clone(), Self::convert_proto_value(val));
+                        obj.insert(
+                            entry.key.clone(),
+                            Self::convert_proto_value_with_depth(val, next_depth),
+                        );
                     }
                 }
                 Value::object(obj)

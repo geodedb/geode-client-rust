@@ -455,7 +455,7 @@ impl Client {
             conformance: dsn.conformance().to_string(),
             username: dsn.username().map(String::from),
             password: dsn.password().map(|p| SecretString::from(p.to_string())),
-            connect_timeout_secs: 10,
+            connect_timeout_secs: dsn.connect_timeout_secs().unwrap_or(10),
             hello_timeout_secs: 5,
             idle_timeout_secs: 30,
         })
@@ -1050,6 +1050,14 @@ impl Connection {
             })?;
 
         let msg_len = u32::from_be_bytes(length_buf) as usize;
+
+        if msg_len > MAX_PROTO_FRAME_BYTES {
+            return Err(Error::limit(format!(
+                "HELLO response frame size {} bytes exceeds max {} bytes",
+                msg_len, MAX_PROTO_FRAME_BYTES
+            )));
+        }
+
         let mut msg_buf = vec![0u8; msg_len];
         recv.read_exact(&mut msg_buf)
             .await
@@ -1194,8 +1202,25 @@ impl Connection {
         Ok(rows)
     }
 
+    /// Maximum recursion depth for converting nested protobuf values (CWE-674).
+    const MAX_PROTO_RECURSION_DEPTH: usize = 64;
+
     /// Convert a protobuf Value to our Value type (static version).
+    /// Delegates to the depth-limited variant starting at depth 0.
     fn convert_proto_value_static(proto_val: &proto::Value) -> Value {
+        Self::convert_proto_value_with_depth(proto_val, 0)
+    }
+
+    /// Depth-limited conversion of protobuf Value to our Value type.
+    /// Returns `Value::null()` when recursion exceeds `MAX_PROTO_RECURSION_DEPTH`
+    /// to prevent stack overflow from deeply nested or malicious payloads (CWE-674).
+    fn convert_proto_value_with_depth(proto_val: &proto::Value, depth: usize) -> Value {
+        if depth > Self::MAX_PROTO_RECURSION_DEPTH {
+            return Value::null();
+        }
+
+        let next_depth = depth + 1;
+
         match &proto_val.kind {
             Some(proto::value::Kind::NullVal(_)) => Value::null(),
             Some(proto::value::Kind::StringVal(s)) => Value::string(s.value.clone()),
@@ -1208,7 +1233,7 @@ impl Connection {
                 let values: Vec<Value> = list
                     .values
                     .iter()
-                    .map(Self::convert_proto_value_static)
+                    .map(|v| Self::convert_proto_value_with_depth(v, next_depth))
                     .collect();
                 Value::array(values)
             }
@@ -1218,7 +1243,7 @@ impl Connection {
                     let val = entry
                         .value
                         .as_ref()
-                        .map(Self::convert_proto_value_static)
+                        .map(|v| Self::convert_proto_value_with_depth(v, next_depth))
                         .unwrap_or_else(Value::null);
                     obj.insert(entry.key.clone(), val);
                 }
@@ -1238,7 +1263,7 @@ impl Connection {
                     let val = entry
                         .value
                         .as_ref()
-                        .map(Self::convert_proto_value_static)
+                        .map(|v| Self::convert_proto_value_with_depth(v, next_depth))
                         .unwrap_or_else(Value::null);
                     props.insert(entry.key.clone(), val);
                 }
@@ -1256,7 +1281,7 @@ impl Connection {
                     let val = entry
                         .value
                         .as_ref()
-                        .map(Self::convert_proto_value_static)
+                        .map(|v| Self::convert_proto_value_with_depth(v, next_depth))
                         .unwrap_or_else(Value::null);
                     props.insert(entry.key.clone(), val);
                 }
@@ -1422,6 +1447,10 @@ impl Connection {
         gql: &str,
         params: &HashMap<String, Value>,
     ) -> Result<(Page, Option<String>)> {
+        validate::query(gql)?;
+        for key in params.keys() {
+            validate::param_name(key)?;
+        }
         match &mut self.kind {
             ConnectionKind::Quic {
                 send,
