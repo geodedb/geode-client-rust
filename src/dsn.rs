@@ -72,6 +72,7 @@ pub struct Dsn {
     client_key: Option<String>,
     server_name: Option<String>,
     connect_timeout_secs: Option<u64>,
+    graph: Option<String>,
     options: HashMap<String, String>,
 }
 
@@ -94,6 +95,7 @@ impl Default for Dsn {
             client_key: None,
             server_name: None,
             connect_timeout_secs: None,
+            graph: None,
             options: HashMap::new(),
         }
     }
@@ -215,12 +217,20 @@ impl Dsn {
         // Parse query parameters
         let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
 
+        // Extract graph from URL path (e.g. quic://host:3141/mygraph)
+        let graph = if !url.path().is_empty() && url.path() != "/" {
+            Some(url.path().trim_start_matches('/').to_string())
+        } else {
+            None
+        };
+
         let mut result = Self {
             transport,
             host,
             port,
             username,
             password,
+            graph,
             ..Default::default()
         };
 
@@ -358,6 +368,9 @@ impl Dsn {
                 "connect_timeout" | "timeout" => {
                     self.connect_timeout_secs = value.parse().ok();
                 }
+                "graph" => {
+                    self.graph = Some(value.to_string());
+                }
                 _ => {
                     // Store unknown parameters for forward compatibility
                     self.options.insert(key.clone(), value.clone());
@@ -452,6 +465,11 @@ impl Dsn {
         self.connect_timeout_secs
     }
 
+    /// Get the graph name if specified.
+    pub fn graph(&self) -> Option<&str> {
+        self.graph.as_deref()
+    }
+
     /// Get the host:port address string.
     pub fn address(&self) -> String {
         if self.host.contains(':') {
@@ -482,6 +500,7 @@ impl std::fmt::Debug for Dsn {
             .field("client_key", &self.client_key)
             .field("server_name", &self.server_name)
             .field("connect_timeout_secs", &self.connect_timeout_secs)
+            .field("graph", &self.graph)
             .field("options", &self.options)
             .finish()
     }

@@ -81,6 +81,7 @@ message HelloRequest {
   string client_name = 4;
   string client_version = 5;
   string wanted_conformance = 6;
+  optional string graph = 7;
 }
 
 message HelloResponse {
@@ -88,6 +89,8 @@ message HelloResponse {
   string session_id = 2;
   string error_message = 3;
   repeated string capabilities = 4;
+  bool password_reset_required = 5;
+  optional string graph = 6;
 }
 
 // ============================================================================

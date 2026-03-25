@@ -346,6 +346,8 @@ pub struct Client {
     /// Password stored using SecretString for secure memory handling (CWE-316).
     /// Automatically zeroized on drop and redacted in Debug output.
     password: Option<SecretString>,
+    /// Graph name to bind on connection (sent in HELLO)
+    graph: Option<String>,
     /// Connection timeout in seconds (default: 10)
     connect_timeout_secs: u64,
     /// HELLO handshake timeout in seconds (default: 5)
@@ -387,6 +389,7 @@ impl Client {
             conformance: "min".to_string(),
             username: None,
             password: None,
+            graph: None,
             connect_timeout_secs: 10,
             hello_timeout_secs: 5,
             idle_timeout_secs: 30,
@@ -455,6 +458,7 @@ impl Client {
             conformance: dsn.conformance().to_string(),
             username: dsn.username().map(String::from),
             password: dsn.password().map(|p| SecretString::from(p.to_string())),
+            graph: dsn.graph().map(String::from),
             connect_timeout_secs: dsn.connect_timeout_secs().unwrap_or(10),
             hello_timeout_secs: 5,
             idle_timeout_secs: 30,
@@ -524,6 +528,19 @@ impl Client {
     /// * `level` - Conformance level (default: "min")
     pub fn conformance(mut self, level: impl Into<String>) -> Self {
         self.conformance = level.into();
+        self
+    }
+
+    /// Set the graph name to bind on connection.
+    ///
+    /// When set, the graph name is sent in the HELLO message so the server
+    /// binds the session to the specified graph automatically.
+    ///
+    /// # Arguments
+    ///
+    /// * `graph` - Graph name to bind (e.g. "mygraph")
+    pub fn graph(mut self, graph: impl Into<String>) -> Self {
+        self.graph = Some(graph.into());
         self
     }
 
@@ -689,6 +706,7 @@ impl Client {
                     &self.conformance,
                     self.username.as_deref(),
                     password_ref,
+                    self.graph.as_deref(),
                     self.connect_timeout_secs,
                     self.hello_timeout_secs,
                     self.idle_timeout_secs,
@@ -706,6 +724,7 @@ impl Client {
                         self.page_size,
                         self.username.as_deref(),
                         password_ref,
+                        self.graph.as_deref(),
                     )
                     .await
                 }
@@ -806,6 +825,7 @@ impl Connection {
         conformance: &str,
         username: Option<&str>,
         password: Option<&str>,
+        graph: Option<&str>,
         connect_timeout_secs: u64,
         hello_timeout_secs: u64,
         idle_timeout_secs: u64,
@@ -823,6 +843,7 @@ impl Connection {
                 conformance,
                 username,
                 password,
+                graph,
                 connect_timeout_secs,
                 hello_timeout_secs,
                 idle_timeout_secs,
@@ -854,20 +875,24 @@ impl Connection {
         page_size: usize,
         username: Option<&str>,
         password: Option<&str>,
+        graph: Option<&str>,
     ) -> Result<Self> {
         use crate::dsn::Dsn;
 
         // Build DSN for gRPC client
         let tls_val = if tls_enabled { "1" } else { "0" };
+        let graph_suffix = graph
+            .map(|g| format!("&graph={}", urlencoding::encode(g)))
+            .unwrap_or_default();
         let dsn_str = if let (Some(user), Some(pass)) = (username, password) {
             format!(
-                "grpc://{}:{}@{}:{}?tls={}&insecure={}",
-                user, pass, host, port, tls_val, skip_verify
+                "grpc://{}:{}@{}:{}?tls={}&insecure={}{}",
+                user, pass, host, port, tls_val, skip_verify, graph_suffix
             )
         } else {
             format!(
-                "grpc://{}:{}?tls={}&insecure={}",
-                host, port, tls_val, skip_verify
+                "grpc://{}:{}?tls={}&insecure={}{}",
+                host, port, tls_val, skip_verify, graph_suffix
             )
         };
 
@@ -892,6 +917,7 @@ impl Connection {
         conformance: &str,
         username: Option<&str>,
         password: Option<&str>,
+        graph: Option<&str>,
         connect_timeout_secs: u64,
         hello_timeout_secs: u64,
         idle_timeout_secs: u64,
@@ -1033,6 +1059,7 @@ impl Connection {
             client_name: hello_name.to_string(),
             client_version: hello_ver.to_string(),
             wanted_conformance: conformance.to_string(),
+            graph: graph.map(String::from),
         };
         let msg = proto::QuicClientMessage {
             msg: Some(proto::quic_client_message::Msg::Hello(hello_req)),

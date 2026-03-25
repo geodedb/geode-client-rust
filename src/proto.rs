@@ -65,6 +65,7 @@ mod tests {
             client_name: String::new(),
             client_version: String::new(),
             wanted_conformance: String::new(),
+            graph: None,
         };
         let msg = QuicClientMessage {
             msg: Some(quic_client_message::Msg::Hello(req)),
@@ -160,6 +161,8 @@ mod tests {
             session_id: "sess123".to_string(),
             error_message: String::new(),
             capabilities: vec![],
+            password_reset_required: false,
+            graph: None,
         };
         let encoded = resp.encode_to_vec();
         let decoded = HelloResponse::decode(encoded.as_slice()).unwrap();

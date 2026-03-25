@@ -132,6 +132,8 @@ pub struct HelloRequest {
     pub client_version: ::prost::alloc::string::String,
     #[prost(string, tag = "6")]
     pub wanted_conformance: ::prost::alloc::string::String,
+    #[prost(string, optional, tag = "7")]
+    pub graph: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HelloResponse {
@@ -143,6 +145,10 @@ pub struct HelloResponse {
     pub error_message: ::prost::alloc::string::String,
     #[prost(string, repeated, tag = "4")]
     pub capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(bool, tag = "5")]
+    pub password_reset_required: bool,
+    #[prost(string, optional, tag = "6")]
+    pub graph: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// ============================================================================
 /// Query Execution (RUN_GQL + PULL)
