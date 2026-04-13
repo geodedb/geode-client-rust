@@ -47,6 +47,18 @@ impl ConnectionPool {
         self
     }
 
+    /// Set the authentication username used for new pooled connections.
+    pub fn username(mut self, username: impl Into<String>) -> Self {
+        self.client = self.client.username(username);
+        self
+    }
+
+    /// Set the authentication password used for new pooled connections.
+    pub fn password(mut self, password: impl Into<String>) -> Self {
+        self.client = self.client.password(password);
+        self
+    }
+
     /// Acquire a connection from the pool
     ///
     /// Returns a healthy connection from the pool, or creates a new one if needed.

@@ -124,30 +124,12 @@ impl Service<Uri> for InsecureTlsConnector {
 /// Provides gRPC-based connection to the Geode database server using the
 /// tonic-generated service client.
 pub struct GrpcClient {
-    client: GeodeServiceClient<Channel>,
+    dsn: Dsn,
     session_id: String,
 }
 
 impl GrpcClient {
-    /// Connect to a Geode server using gRPC.
-    ///
-    /// # Arguments
-    ///
-    /// * `dsn` - Parsed DSN with gRPC transport
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use geode_client::dsn::Dsn;
-    /// use geode_client::grpc::GrpcClient;
-    ///
-    /// # async fn example() -> geode_client::Result<()> {
-    /// let dsn = Dsn::parse("grpc://localhost:50051")?;
-    /// let client = GrpcClient::connect(&dsn).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn connect(dsn: &Dsn) -> Result<Self> {
+    async fn connect_channel(dsn: &Dsn) -> Result<Channel> {
         // tonic/rustls TLS setup requires a process-wide crypto provider.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -177,8 +159,7 @@ impl GrpcClient {
             }
         }
 
-        // Configure TLS if needed.
-        let channel = if dsn.tls_enabled() && dsn.skip_verify() {
+        if dsn.tls_enabled() && dsn.skip_verify() {
             let mut client_config = rustls::ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
@@ -201,7 +182,7 @@ impl GrpcClient {
                         "gRPC connection failed to {}: {} ({:?})",
                         addr, e, e
                     ))
-                })?
+                })
         } else if dsn.tls_enabled() {
             let mut tls = ClientTlsConfig::new()
                 .with_enabled_roots()
@@ -231,38 +212,63 @@ impl GrpcClient {
                         "gRPC connection failed to {}: {} ({:?})",
                         addr, e, e
                     ))
-                })?
+                })
         } else {
             endpoint.connect().await.map_err(|e| {
                 Error::connection(format!(
                     "gRPC connection failed to {}: {} ({:?})",
                     addr, e, e
                 ))
-            })?
-        };
+            })
+        }
+    }
 
-        let grpc_client = GeodeServiceClient::new(channel);
+    async fn connect_service(dsn: &Dsn) -> Result<GeodeServiceClient<Channel>> {
+        let channel = Self::connect_channel(dsn).await?;
+        Ok(GeodeServiceClient::new(channel))
+    }
 
-        let mut client = Self {
-            client: grpc_client,
-            session_id: String::new(),
-        };
+    /// Connect to a Geode server using gRPC.
+    ///
+    /// # Arguments
+    ///
+    /// * `dsn` - Parsed DSN with gRPC transport
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use geode_client::dsn::Dsn;
+    /// use geode_client::grpc::GrpcClient;
+    ///
+    /// # async fn example() -> geode_client::Result<()> {
+    /// let dsn = Dsn::parse("grpc://localhost:50051")?;
+    /// let client = GrpcClient::connect(&dsn).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect(dsn: &Dsn) -> Result<Self> {
+        let mut grpc_client = Self::connect_service(dsn).await?;
+        let session_id = Self::handshake(
+            &mut grpc_client,
+            dsn.username(),
+            dsn.password(),
+            dsn.graph(),
+        )
+        .await?;
 
-        // Perform handshake
-        client
-            .handshake(dsn.username(), dsn.password(), dsn.graph())
-            .await?;
-
-        Ok(client)
+        Ok(Self {
+            dsn: dsn.clone(),
+            session_id,
+        })
     }
 
     /// Perform authentication handshake.
     async fn handshake(
-        &mut self,
+        client: &mut GeodeServiceClient<Channel>,
         username: Option<&str>,
         password: Option<&str>,
         graph: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let request = proto::HelloRequest {
             username: username.unwrap_or("").to_string(),
             password: password.unwrap_or("").to_string(),
@@ -273,8 +279,7 @@ impl GrpcClient {
             graph: graph.map(String::from),
         };
 
-        let response = self
-            .client
+        let response = client
             .handshake(Request::new(request))
             .await
             .map_err(|e| Error::connection(format!("Handshake failed: {}", e)))?;
@@ -284,8 +289,7 @@ impl GrpcClient {
             return Err(Error::auth(resp.error_message));
         }
 
-        self.session_id = resp.session_id;
-        Ok(())
+        Ok(resp.session_id)
     }
 
     /// Execute a GQL query.
@@ -313,8 +317,11 @@ impl GrpcClient {
             params: proto_params,
         };
 
-        let response = self
-            .client
+        // The current server can leave tonic channels in a bad state after
+        // previous RPCs. Use a fresh channel per RPC and keep only the
+        // server-side session stable via session_id.
+        let mut client = Self::connect_service(&self.dsn).await?;
+        let response = client
             .execute(Request::new(request))
             .await
             .map_err(|e| Error::query(format!("Query execution failed: {}", e)))?;
@@ -396,7 +403,8 @@ impl GrpcClient {
             session_id: self.session_id.clone(),
         };
 
-        self.client
+        let mut client = Self::connect_service(&self.dsn).await?;
+        client
             .begin(Request::new(request))
             .await
             .map_err(|e| Error::connection(format!("Begin transaction failed: {}", e)))?;
@@ -410,7 +418,8 @@ impl GrpcClient {
             session_id: self.session_id.clone(),
         };
 
-        self.client
+        let mut client = Self::connect_service(&self.dsn).await?;
+        client
             .commit(Request::new(request))
             .await
             .map_err(|e| Error::connection(format!("Commit failed: {}", e)))?;
@@ -424,7 +433,8 @@ impl GrpcClient {
             session_id: self.session_id.clone(),
         };
 
-        self.client
+        let mut client = Self::connect_service(&self.dsn).await?;
+        client
             .rollback(Request::new(request))
             .await
             .map_err(|e| Error::connection(format!("Rollback failed: {}", e)))?;
@@ -454,8 +464,8 @@ impl GrpcClient {
 
     /// Send a ping request.
     pub async fn ping(&mut self) -> Result<bool> {
-        let response = self
-            .client
+        let mut client = Self::connect_service(&self.dsn).await?;
+        let response = client
             .ping(Request::new(proto::PingRequest {}))
             .await
             .map_err(|e| Error::connection(format!("Ping failed: {}", e)))?;

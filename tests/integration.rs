@@ -273,6 +273,31 @@ async fn get_test_connection() -> Connection {
     })
 }
 
+fn build_test_client(host: &str, port: u16) -> Client {
+    let (username, password) = get_auth();
+    if use_grpc_transport() {
+        let mut params = vec!["insecure=true".to_string()];
+        if let Some(ca_cert) = get_tls_ca() {
+            params.push(format!("ca_cert={}", urlencoding::encode(&ca_cert)));
+        }
+        let dsn = format!(
+            "grpc://{}:{}@{}:{}?{}",
+            username,
+            password,
+            host,
+            port,
+            params.join("&")
+        );
+        return Client::from_dsn(&dsn)
+            .unwrap_or_else(|e| panic!("Failed to parse gRPC DSN {}: {}", dsn, e));
+    }
+
+    Client::new(host, port)
+        .skip_verify(true)
+        .username(&username)
+        .password(&password)
+}
+
 /// Clean up test data
 async fn cleanup_test_data(conn: &mut Connection) {
     let _ = conn.query("MATCH (n) DETACH DELETE n").await;
@@ -868,11 +893,11 @@ async fn test_docker_limit_skip() {
     let mut conn = get_test_connection().await;
     cleanup_test_data(&mut conn).await;
 
-    for i in 1..=10 {
-        conn.query(&format!("CREATE (n:Number {{value: {}}})", i))
-            .await
-            .unwrap();
-    }
+    let seed = (1..=10)
+        .map(|i| format!("(n{}:Number {{value: {}}})", i, i))
+        .collect::<Vec<_>>()
+        .join(", ");
+    conn.query(&format!("CREATE {}", seed)).await.unwrap();
 
     // LIMIT
     let (page, _) = conn
@@ -911,9 +936,9 @@ async fn test_docker_count() {
     let mut conn = get_test_connection().await;
     cleanup_test_data(&mut conn).await;
 
-    conn.query("CREATE (a:CountTest)").await.unwrap();
-    conn.query("CREATE (b:CountTest)").await.unwrap();
-    conn.query("CREATE (c:CountTest)").await.unwrap();
+    conn.query("CREATE (a:CountTest), (b:CountTest), (c:CountTest)")
+        .await
+        .unwrap();
 
     let (page, _) = conn
         .query("MATCH (n:CountTest) RETURN count(n) AS cnt")
@@ -1114,11 +1139,7 @@ async fn test_docker_concurrent_queries() {
     for i in 0..5 {
         let h = host.clone();
         let handle = tokio::spawn(async move {
-            let mut conn = Client::new(&h, port)
-                .skip_verify(true)
-                .connect()
-                .await
-                .unwrap();
+            let mut conn = build_test_client(&h, port).connect().await.unwrap();
 
             let (page, _) = conn.query(&format!("RETURN {} AS num", i)).await.unwrap();
 
@@ -1142,9 +1163,18 @@ async fn test_docker_concurrent_queries() {
 
 #[tokio::test]
 async fn test_docker_connection_pool() {
+    if use_grpc_transport() {
+        eprintln!("ConnectionPool is QUIC-only; skipping pool test for gRPC transport");
+        return;
+    }
+
     let (host, port) = get_server_info().await;
 
-    let pool = ConnectionPool::new(&host, port, 5).skip_verify(true);
+    let (username, password) = get_auth();
+    let pool = ConnectionPool::new(&host, port, 5)
+        .skip_verify(true)
+        .username(&username)
+        .password(&password);
 
     // Run multiple queries through pool
     let mut handles = vec![];

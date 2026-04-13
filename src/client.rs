@@ -391,7 +391,7 @@ impl Client {
             password: None,
             graph: None,
             connect_timeout_secs: 10,
-            hello_timeout_secs: 5,
+            hello_timeout_secs: 15,
             idle_timeout_secs: 30,
         }
     }
@@ -460,7 +460,7 @@ impl Client {
             password: dsn.password().map(|p| SecretString::from(p.to_string())),
             graph: dsn.graph().map(String::from),
             connect_timeout_secs: dsn.connect_timeout_secs().unwrap_or(10),
-            hello_timeout_secs: 5,
+            hello_timeout_secs: 15,
             idle_timeout_secs: 30,
         })
     }
@@ -756,7 +756,9 @@ enum ConnectionKind {
     },
     /// gRPC transport connection
     #[cfg(feature = "grpc")]
-    Grpc { client: crate::grpc::GrpcClient },
+    Grpc {
+        client: Box<crate::grpc::GrpcClient>,
+    },
 }
 
 /// An active connection to a Geode database server.
@@ -897,7 +899,7 @@ impl Connection {
         };
 
         let dsn = Dsn::parse(&dsn_str)?;
-        let client = crate::grpc::GrpcClient::connect(&dsn).await?;
+        let client = Box::new(crate::grpc::GrpcClient::connect(&dsn).await?);
 
         Ok(Self {
             kind: ConnectionKind::Grpc { client },
