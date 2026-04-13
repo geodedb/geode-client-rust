@@ -1608,8 +1608,9 @@ impl Connection {
 
         trace!("Schema columns: {:?}", columns);
 
-        // Check for inline data page
-        if let Some(inline_resp) = Self::try_read_proto_quic(recv).await? {
+        // The server may emit metrics or heartbeat frames between schema and the
+        // first data page. Ignore non-page execute frames until we see data.
+        while let Some(inline_resp) = Self::try_read_proto_quic(recv).await? {
             if let Some(proto::quic_server_message::Msg::Execute(inline_exec)) = inline_resp.msg {
                 if let Some(proto::execution_response::Payload::Error(ref err)) =
                     inline_exec.payload
@@ -1633,16 +1634,6 @@ impl Connection {
                     };
                     return Ok((page, None));
                 }
-
-                // Metrics or heartbeat - empty result
-                let page = Page {
-                    columns,
-                    rows: Vec::new(),
-                    ordered: false,
-                    order_keys: Vec::new(),
-                    final_page: true,
-                };
-                return Ok((page, None));
             }
         }
 
@@ -1659,40 +1650,33 @@ impl Connection {
             return Ok((page, None));
         }
 
-        // Read next response for data page
-        let resp = Self::read_proto_quic(recv, 30).await?;
-        if let Some(proto::quic_server_message::Msg::Execute(exec_resp)) = resp.msg {
-            if let Some(proto::execution_response::Payload::Error(ref err)) = exec_resp.payload {
-                return Err(Error::Query {
-                    code: err.code.clone(),
-                    message: err.message.clone(),
-                });
-            }
+        // Read blocking responses until we see a data page or query error.
+        loop {
+            let resp = Self::read_proto_quic(recv, 30).await?;
+            if let Some(proto::quic_server_message::Msg::Execute(exec_resp)) = resp.msg {
+                if let Some(proto::execution_response::Payload::Error(ref err)) = exec_resp.payload
+                {
+                    return Err(Error::Query {
+                        code: err.code.clone(),
+                        message: err.message.clone(),
+                    });
+                }
 
-            if let Some(proto::execution_response::Payload::Page(ref page_data)) = exec_resp.payload
-            {
-                let rows = Self::parse_proto_rows_static(&page_data.rows, &columns)?;
-                let page = Page {
-                    columns,
-                    rows,
-                    ordered: page_data.ordered,
-                    order_keys: page_data.order_keys.clone(),
-                    final_page: page_data.r#final,
-                };
-                return Ok((page, None));
+                if let Some(proto::execution_response::Payload::Page(ref page_data)) =
+                    exec_resp.payload
+                {
+                    let rows = Self::parse_proto_rows_static(&page_data.rows, &columns)?;
+                    let page = Page {
+                        columns,
+                        rows,
+                        ordered: page_data.ordered,
+                        order_keys: page_data.order_keys.clone(),
+                        final_page: page_data.r#final,
+                    };
+                    return Ok((page, None));
+                }
             }
         }
-
-        // Empty result
-        let page = Page {
-            columns,
-            rows: Vec::new(),
-            ordered: false,
-            order_keys: Vec::new(),
-            final_page: true,
-        };
-
-        Ok((page, None))
     }
 
     /// Execute a query without parameters (synchronous-style blocking version for test runner)

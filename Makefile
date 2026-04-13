@@ -143,7 +143,7 @@ test-integration-grpc:
 	@echo "Tests connect to Geode gRPC server"
 	@echo "Start server first: cd ../geode && ./zig-out/bin/geode serve --listen-grpc 0.0.0.0:50051"
 	@echo ""
-	GEODE_TRANSPORT=grpc $(CARGO) test --features integration $(CARGO_FLAGS) -- --test-threads=1
+	GEODE_TRANSPORT=grpc GEODE_TLS_CA=$(GEODE_TLS_CA) $(CARGO) test --features integration $(CARGO_FLAGS) -- --test-threads=1
 	@echo "✓ gRPC integration tests complete"
 
 test-all: test-unit test-proptest test-doc test-integration

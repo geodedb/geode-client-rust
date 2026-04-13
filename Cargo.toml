@@ -30,6 +30,9 @@ secrecy = "0.10"  # Zeroize sensitive data on drop
 tonic = { version = "0.12", features = ["tls", "channel"] }
 prost = "0.13"
 http = "1.0"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio-rustls = "0.26"
+tower-service = "0.3"
 
 # Serialization (used internally for Value types)
 serde = { version = "1.0", features = ["derive"] }

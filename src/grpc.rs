@@ -4,9 +4,20 @@
 //! `GeodeServiceClient` from `crate::proto::geode_service_client`.
 
 use std::collections::HashMap;
+use std::fs;
+use std::future::Future;
+use std::net::IpAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 
+use http::Uri;
+use hyper_util::rt::TokioIo;
+use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector as RustlsConnector;
 use tonic::Request;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
+use tower_service::Service;
 
 use crate::client::{Column, Page};
 use crate::dsn::Dsn;
@@ -15,6 +26,98 @@ use crate::proto;
 use crate::proto::execution_response::Payload;
 use crate::proto::geode_service_client::GeodeServiceClient;
 use crate::types::Value;
+
+#[derive(Debug)]
+struct SkipServerVerification;
+
+impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::ED25519,
+        ]
+    }
+}
+
+#[derive(Clone)]
+struct InsecureTlsConnector {
+    config: Arc<rustls::ClientConfig>,
+    server_name: rustls::pki_types::ServerName<'static>,
+}
+
+impl Service<Uri> for InsecureTlsConnector {
+    type Response = TokioIo<tokio_rustls::client::TlsStream<TcpStream>>;
+    type Error = std::io::Error;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, uri: Uri) -> Self::Future {
+        let addr = match (uri.host(), uri.port_u16()) {
+            (Some(host), Some(port)) => format!("{host}:{port}"),
+            (Some(host), None) => format!("{host}:443"),
+            _ => {
+                return Box::pin(async {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "missing host in URI",
+                    ))
+                });
+            }
+        };
+        let connector = RustlsConnector::from(self.config.clone());
+        let server_name = self.server_name.clone();
+
+        Box::pin(async move {
+            let stream = TcpStream::connect(addr).await?;
+            stream.set_nodelay(true)?;
+            let tls = connector
+                .connect(server_name, stream)
+                .await
+                .map_err(std::io::Error::other)?;
+            Ok(TokioIo::new(tls))
+        })
+    }
+}
 
 /// gRPC client for Geode.
 ///
@@ -45,29 +148,98 @@ impl GrpcClient {
     /// # }
     /// ```
     pub async fn connect(dsn: &Dsn) -> Result<Self> {
-        let addr = if dsn.tls_enabled() {
+        // tonic/rustls TLS setup requires a process-wide crypto provider.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let addr = if dsn.tls_enabled() && !dsn.skip_verify() {
             format!("https://{}", dsn.address())
         } else {
             format!("http://{}", dsn.address())
         };
 
-        let endpoint = Endpoint::from_shared(addr.clone())
+        let mut endpoint = Endpoint::from_shared(addr.clone())
             .map_err(|e| Error::connection(format!("Invalid endpoint: {}", e)))?;
 
-        // Configure TLS if needed
-        let endpoint = if dsn.tls_enabled() && dsn.skip_verify() {
-            // Skip TLS verification (insecure - for development only)
-            endpoint
-                .tls_config(tonic::transport::ClientTlsConfig::new().with_enabled_roots())
-                .map_err(|e| Error::tls(format!("TLS config error: {}", e)))?
-        } else {
-            endpoint
-        };
+        let tls_server_name =
+            dsn.server_name()
+                .map(str::to_string)
+                .or_else(|| match dsn.host().parse::<IpAddr>() {
+                    Ok(_) => Some("localhost".to_string()),
+                    Err(_) => None,
+                });
 
-        let channel = endpoint
-            .connect()
-            .await
-            .map_err(|e| Error::connection(format!("gRPC connection failed to {}: {}", addr, e)))?;
+        if dsn.tls_enabled() {
+            if let Some(server_name) = &tls_server_name {
+                let origin = format!("https://{}:{}", server_name, dsn.port())
+                    .parse()
+                    .map_err(|e| Error::tls(format!("Invalid TLS origin: {}", e)))?;
+                endpoint = endpoint.origin(origin);
+            }
+        }
+
+        // Configure TLS if needed.
+        let channel = if dsn.tls_enabled() && dsn.skip_verify() {
+            let mut client_config = rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+                .with_no_client_auth();
+            client_config.alpn_protocols.push(b"h2".to_vec());
+
+            let server_name = tls_server_name
+                .unwrap_or_else(|| dsn.host().to_string())
+                .try_into()
+                .map_err(|e| Error::tls(format!("Invalid TLS server name: {}", e)))?;
+
+            endpoint
+                .connect_with_connector(InsecureTlsConnector {
+                    config: Arc::new(client_config),
+                    server_name,
+                })
+                .await
+                .map_err(|e| {
+                    Error::connection(format!(
+                        "gRPC connection failed to {}: {} ({:?})",
+                        addr, e, e
+                    ))
+                })?
+        } else if dsn.tls_enabled() {
+            let mut tls = ClientTlsConfig::new()
+                .with_enabled_roots()
+                .assume_http2(true);
+
+            if let Some(server_name) = tls_server_name {
+                tls = tls.domain_name(server_name);
+            }
+
+            if let Some(ca_cert_path) = dsn.ca_cert() {
+                let ca_pem = fs::read(ca_cert_path).map_err(|e| {
+                    Error::tls(format!(
+                        "Failed to read CA certificate {}: {}",
+                        ca_cert_path, e
+                    ))
+                })?;
+                tls = tls.ca_certificate(Certificate::from_pem(ca_pem));
+            }
+
+            endpoint
+                .tls_config(tls)
+                .map_err(|e| Error::tls(format!("TLS config error: {}", e)))?
+                .connect()
+                .await
+                .map_err(|e| {
+                    Error::connection(format!(
+                        "gRPC connection failed to {}: {} ({:?})",
+                        addr, e, e
+                    ))
+                })?
+        } else {
+            endpoint.connect().await.map_err(|e| {
+                Error::connection(format!(
+                    "gRPC connection failed to {}: {} ({:?})",
+                    addr, e, e
+                ))
+            })?
+        };
 
         let grpc_client = GeodeServiceClient::new(channel);
 
@@ -77,7 +249,9 @@ impl GrpcClient {
         };
 
         // Perform handshake
-        client.handshake(dsn.username(), dsn.password(), dsn.graph()).await?;
+        client
+            .handshake(dsn.username(), dsn.password(), dsn.graph())
+            .await?;
 
         Ok(client)
     }

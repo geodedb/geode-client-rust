@@ -84,15 +84,32 @@ fn get_geode_image() -> (String, String) {
     )
 }
 
+fn get_auth() -> (String, String) {
+    let username = env::var("GEODE_USERNAME").unwrap_or_else(|_| "geode".to_string());
+    let password = env::var("GEODE_PASSWORD")
+        .or_else(|_| env::var("GEODE_DEFAULT_PASSWORD"))
+        .or_else(|_| env::var("GEODE_ADMIN_PASSWORD"))
+        .unwrap_or_else(|_| "GeodeTestPassword123!".to_string());
+    (username, password)
+}
+
+fn get_tls_ca() -> Option<String> {
+    env::var("GEODE_TLS_CA").ok().filter(|v| !v.is_empty())
+}
+
 /// Start a Geode container for testing
 async fn start_geode_container() -> Result<GeodeContainer, Box<dyn std::error::Error>> {
     let (image_name, tag) = get_geode_image();
 
-    // Use UDP for QUIC protocol
-    // Match Go client behavior - don't set GEODE_ADMIN_PASSWORD (no auth required by default)
+    let (_username, password) = get_auth();
+
+    // Use UDP for QUIC protocol.
     let container = GenericImage::new(image_name, tag)
         .with_exposed_port(DOCKER_GEODE_PORT.udp())
         .with_exposed_port(DOCKER_GRPC_PORT.tcp())
+        .with_env_var("GEODE_DEFAULT_PASSWORD", password.clone())
+        .with_env_var("GEODE_ADMIN_PASSWORD", password)
+        .with_env_var("GEODE_DISABLE_AUDIT", "1")
         .with_cmd(vec![
             "serve".to_string(),
             "--listen".to_string(),
@@ -117,11 +134,17 @@ async fn start_geode_container() -> Result<GeodeContainer, Box<dyn std::error::E
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Health check: try to connect with retries
-    // Match Go client behavior - no auth credentials by default
+    let (username, password) = get_auth();
     let max_retries = 10;
     let mut last_error = None;
     for attempt in 1..=max_retries {
-        match Client::new(&host, port).skip_verify(true).connect().await {
+        match Client::new(&host, port)
+            .skip_verify(true)
+            .username(&username)
+            .password(&password)
+            .connect()
+            .await
+        {
             Ok(conn) => {
                 // Connection successful, server is ready
                 drop(conn);
@@ -211,11 +234,21 @@ async fn get_test_connection() -> Connection {
     let (host, port) = get_server_info().await;
 
     if use_grpc_transport() {
-        // Use gRPC transport via DSN, include credentials if set
-        let dsn = match (env::var("GEODE_USERNAME"), env::var("GEODE_PASSWORD")) {
-            (Ok(user), Ok(pass)) => format!("grpc://{}:{}@{}:{}?tls=0", user, pass, host, port),
-            _ => format!("grpc://{}:{}?tls=0", host, port),
-        };
+        // Use TLS-enabled gRPC. When the test server exposes a self-signed cert,
+        // prefer trusting that cert explicitly via GEODE_TLS_CA.
+        let (user, pass) = get_auth();
+        let mut params = vec!["insecure=true".to_string()];
+        if let Some(ca_cert) = get_tls_ca() {
+            params.push(format!("ca_cert={}", urlencoding::encode(&ca_cert)));
+        }
+        let dsn = format!(
+            "grpc://{}:{}@{}:{}?{}",
+            user,
+            pass,
+            host,
+            port,
+            params.join("&")
+        );
         let client = Client::from_dsn(&dsn)
             .unwrap_or_else(|e| panic!("Failed to parse gRPC DSN {}: {}", dsn, e));
         return client.connect().await.unwrap_or_else(|e| {
@@ -226,17 +259,11 @@ async fn get_test_connection() -> Connection {
         });
     }
 
-    // Match Go client behavior - no auth credentials by default
-    // Override with GEODE_USERNAME/GEODE_PASSWORD if needed
-    let mut client = Client::new(&host, port).skip_verify(true);
-
-    // Only add credentials if explicitly set via environment
-    if let Ok(username) = env::var("GEODE_USERNAME") {
-        client = client.username(&username);
-        if let Ok(password) = env::var("GEODE_PASSWORD") {
-            client = client.password(&password);
-        }
-    }
+    let (username, password) = get_auth();
+    let client = Client::new(&host, port)
+        .skip_verify(true)
+        .username(&username)
+        .password(&password);
 
     client.connect().await.unwrap_or_else(|e| {
         panic!(
