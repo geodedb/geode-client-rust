@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout};
 
 use crate::dsn::{Dsn, Transport};
 use crate::error::{Error, Result};
@@ -1177,44 +1177,6 @@ impl Connection {
         .map_err(|_| Error::timeout())?
     }
 
-    /// Attempt to read a buffered protobuf message without blocking (QUIC).
-    /// Returns Ok(None) if no complete message is available immediately.
-    /// Timeout covers the entire read (length prefix + body).
-    /// Enforces MAX_PROTO_FRAME_BYTES to prevent unbounded allocation (CWE-400).
-    async fn try_read_proto_quic(
-        recv: &mut quinn::RecvStream,
-    ) -> Result<Option<proto::QuicServerMessage>> {
-        let read_result = timeout(Duration::from_millis(500), async {
-            let mut length_buf = [0u8; 4];
-            recv.read_exact(&mut length_buf)
-                .await
-                .map_err(|e| Error::connection(format!("Failed to read response: {}", e)))?;
-
-            let msg_len = u32::from_be_bytes(length_buf) as usize;
-
-            if msg_len > MAX_PROTO_FRAME_BYTES {
-                return Err(Error::limit(format!(
-                    "Frame size {} bytes exceeds max {} bytes",
-                    msg_len, MAX_PROTO_FRAME_BYTES
-                )));
-            }
-
-            let mut msg_buf = vec![0u8; msg_len];
-            recv.read_exact(&mut msg_buf)
-                .await
-                .map_err(|e| Error::connection(format!("Failed to read response body: {}", e)))?;
-
-            proto::decode_quic_server_message(&msg_buf)
-        })
-        .await;
-
-        match read_result {
-            Ok(Ok(msg)) => Ok(Some(msg)),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Ok(None), // Timeout - no data available
-        }
-    }
-
     /// Parse protobuf rows into Value maps (static version for QUIC).
     fn parse_proto_rows_static(
         proto_rows: &[proto::Row],
@@ -1442,9 +1404,21 @@ impl Connection {
             ConnectionKind::Quic {
                 send,
                 recv,
+                buffer,
                 session_id,
                 ..
-            } => Self::query_with_params_quic(send, recv, gql, params, session_id).await,
+            } => {
+                Self::query_with_params_quic(
+                    send,
+                    recv,
+                    buffer,
+                    gql,
+                    params,
+                    session_id,
+                    self.page_size,
+                )
+                .await
+            }
             #[cfg(feature = "grpc")]
             ConnectionKind::Grpc { client } => client.query_with_params(gql, params).await,
         }
@@ -1454,12 +1428,14 @@ impl Connection {
     async fn query_with_params_quic(
         send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
+        buffer: &mut Vec<u8>,
         gql: &str,
         params: &HashMap<String, Value>,
         session_id: &str,
+        page_size: usize,
     ) -> Result<(Page, Option<String>)> {
         let (page, cursor) =
-            Self::query_with_params_quic_inner(send, recv, gql, params, session_id).await?;
+            Self::query_with_params_quic_inner(send, recv, buffer, gql, params, session_id).await?;
 
         // If the first page is not final, fetch remaining pages via PULL
         if !page.final_page {
@@ -1491,13 +1467,13 @@ impl Connection {
                 let pull_req = proto::QuicClientMessage {
                     msg: Some(proto::quic_client_message::Msg::Pull(proto::PullRequest {
                         request_id,
-                        page_size: 1000,
-                        session_id: String::new(),
+                        page_size: page_size as u32,
+                        session_id: session_id.to_string(),
                     })),
                 };
                 Self::send_proto_quic(send, &pull_req).await?;
 
-                let resp = Self::read_proto_quic(recv, 30).await?;
+                let resp = Self::read_proto_quic_buffered(recv, buffer, 30).await?;
 
                 // Server sends pull data in pull.response
                 let exec_resp = match &resp.msg {
@@ -1541,9 +1517,13 @@ impl Connection {
                 order_keys,
                 final_page: true,
             };
+            Self::drain_execute_trailers_quic(recv, buffer).await?;
             return Ok((final_page, cursor));
         }
 
+        if page.final_page {
+            Self::drain_execute_trailers_quic(recv, buffer).await?;
+        }
         Ok((page, cursor))
     }
 
@@ -1551,6 +1531,7 @@ impl Connection {
     async fn query_with_params_quic_inner(
         send: &mut quinn::SendStream,
         recv: &mut quinn::RecvStream,
+        buffer: &mut Vec<u8>,
         gql: &str,
         params: &HashMap<String, Value>,
         session_id: &str,
@@ -1578,7 +1559,7 @@ impl Connection {
             .map_err(|e| Error::query(format!("{}", e)))?;
 
         // Read first response (should be schema or error)
-        let resp = Self::read_proto_quic(recv, 10).await?;
+        let resp = Self::read_proto_quic_buffered(recv, buffer, 10).await?;
 
         let exec_resp = match resp.msg {
             Some(proto::quic_server_message::Msg::Execute(e)) => e,
@@ -1588,7 +1569,7 @@ impl Connection {
         // Check for error in payload
         if let Some(proto::execution_response::Payload::Error(ref err)) = exec_resp.payload {
             // Drain any follow-up messages (e.g., data page) the server may send after error
-            let _ = Self::try_read_proto_quic(recv).await;
+            let _ = Self::try_read_proto_quic_buffered(recv, buffer).await;
             return Err(Error::Query {
                 code: err.code.clone(),
                 message: err.message.clone(),
@@ -1612,7 +1593,7 @@ impl Connection {
 
         // The server may emit metrics or heartbeat frames between schema and the
         // first data page. Ignore non-page execute frames until we see data.
-        while let Some(inline_resp) = Self::try_read_proto_quic(recv).await? {
+        while let Some(inline_resp) = Self::try_read_proto_quic_buffered(recv, buffer).await? {
             if let Some(proto::quic_server_message::Msg::Execute(inline_exec)) = inline_resp.msg {
                 if let Some(proto::execution_response::Payload::Error(ref err)) =
                     inline_exec.payload
@@ -1639,6 +1620,20 @@ impl Connection {
             }
         }
 
+        // Non-row statements can complete with a status-only response.
+        if columns.is_empty() {
+            return Ok((
+                Page {
+                    columns,
+                    rows: Vec::new(),
+                    ordered: false,
+                    order_keys: Vec::new(),
+                    final_page: true,
+                },
+                None,
+            ));
+        }
+
         // Check if we got a page in the first response
         if let Some(proto::execution_response::Payload::Page(ref page_data)) = exec_resp.payload {
             let rows = Self::parse_proto_rows_static(&page_data.rows, &columns)?;
@@ -1654,7 +1649,7 @@ impl Connection {
 
         // Read blocking responses until we see a data page or query error.
         loop {
-            let resp = Self::read_proto_quic(recv, 30).await?;
+            let resp = Self::read_proto_quic_buffered(recv, buffer, 30).await?;
             if let Some(proto::quic_server_message::Msg::Execute(exec_resp)) = resp.msg {
                 if let Some(proto::execution_response::Payload::Error(ref err)) = exec_resp.payload
                 {
@@ -1679,6 +1674,108 @@ impl Connection {
                 }
             }
         }
+    }
+
+    fn decode_buffered_quic_message(
+        buffer: &mut Vec<u8>,
+    ) -> Result<Option<proto::QuicServerMessage>> {
+        if buffer.len() < 4 {
+            return Ok(None);
+        }
+
+        let msg_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+        if msg_len > MAX_PROTO_FRAME_BYTES {
+            return Err(Error::limit(format!(
+                "Frame size {} bytes exceeds max {} bytes",
+                msg_len, MAX_PROTO_FRAME_BYTES
+            )));
+        }
+
+        let total_len = 4 + msg_len;
+        if buffer.len() < total_len {
+            return Ok(None);
+        }
+
+        let msg = proto::decode_quic_server_message(&buffer[4..total_len])?;
+        buffer.drain(..total_len);
+        Ok(Some(msg))
+    }
+
+    async fn read_proto_quic_buffered(
+        recv: &mut quinn::RecvStream,
+        buffer: &mut Vec<u8>,
+        timeout_secs: u64,
+    ) -> Result<proto::QuicServerMessage> {
+        if let Some(msg) = Self::decode_buffered_quic_message(buffer)? {
+            return Ok(msg);
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(Error::timeout());
+            }
+
+            let remaining = deadline.saturating_duration_since(now);
+            let chunk = timeout(remaining, recv.read_chunk(MAX_PROTO_FRAME_BYTES, true))
+                .await
+                .map_err(|_| Error::timeout())?
+                .map_err(|e| Error::connection(format!("Failed to read response: {}", e)))?
+                .ok_or_else(|| Error::connection("Stream closed while reading response"))?;
+            buffer.extend_from_slice(&chunk.bytes);
+
+            if let Some(msg) = Self::decode_buffered_quic_message(buffer)? {
+                return Ok(msg);
+            }
+        }
+    }
+
+    async fn try_read_proto_quic_buffered(
+        recv: &mut quinn::RecvStream,
+        buffer: &mut Vec<u8>,
+    ) -> Result<Option<proto::QuicServerMessage>> {
+        if let Some(msg) = Self::decode_buffered_quic_message(buffer)? {
+            return Ok(Some(msg));
+        }
+
+        let read_result = timeout(
+            Duration::from_millis(500),
+            recv.read_chunk(MAX_PROTO_FRAME_BYTES, true),
+        )
+        .await;
+        let chunk = match read_result {
+            Ok(Ok(Some(chunk))) => chunk,
+            Ok(Ok(None)) => return Ok(None),
+            Ok(Err(e)) => {
+                return Err(Error::connection(format!("Failed to read response: {}", e)));
+            }
+            Err(_) => return Ok(None),
+        };
+
+        buffer.extend_from_slice(&chunk.bytes);
+        Self::decode_buffered_quic_message(buffer)
+    }
+
+    async fn drain_execute_trailers_quic(
+        recv: &mut quinn::RecvStream,
+        buffer: &mut Vec<u8>,
+    ) -> Result<()> {
+        while let Some(resp) = Self::try_read_proto_quic_buffered(recv, buffer).await? {
+            let Some(proto::quic_server_message::Msg::Execute(exec)) = resp.msg else {
+                break;
+            };
+
+            let is_trailer = matches!(
+                exec.payload,
+                Some(proto::execution_response::Payload::Metrics(_))
+                    | Some(proto::execution_response::Payload::Heartbeat(_))
+            );
+            if !is_trailer {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Execute a query without parameters (synchronous-style blocking version for test runner)
