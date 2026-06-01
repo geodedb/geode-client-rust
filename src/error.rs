@@ -5,6 +5,13 @@ use thiserror::Error;
 /// Result type alias for Geode operations
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// ISO/IEC 39075 status class for authorization errors.
+pub const STATUS_AUTH: &str = "28000";
+/// Geode-specific extension class for "password reset required".
+pub const STATUS_PASSWORD_RESET: &str = "08P01";
+/// ISO/IEC 39075 status class for syntax errors.
+pub const STATUS_SYNTAX: &str = "42000";
+
 /// Error types that can occur when using the Geode client
 #[derive(Error, Debug)]
 pub enum Error {
@@ -162,6 +169,33 @@ impl Error {
             Error::Query { code, .. } => Some(code),
             _ => None,
         }
+    }
+
+    /// Reports whether this is a Geode authentication or authorization
+    /// failure.
+    ///
+    /// Returns `true` for query errors carrying the ISO/IEC 39075 status
+    /// class `28000` (authorization error) or the Geode-specific `08P01`
+    /// (password reset required) extension. Mirrors the Go reference
+    /// client's `IsAuthError`.
+    #[inline]
+    pub fn is_auth_error(&self) -> bool {
+        matches!(
+            self,
+            Error::Query { code, .. } if code == STATUS_AUTH || code == STATUS_PASSWORD_RESET
+        )
+    }
+
+    /// Reports whether this is a GQL parse or syntax error (status class
+    /// `42000`).
+    ///
+    /// The Geode engine returns `42000` for unrecognised statements,
+    /// including admin DDL verbs not yet implemented in the connected
+    /// server build, so handlers can use this to degrade gracefully.
+    /// Mirrors the Go reference client's `IsSyntaxError`.
+    #[inline]
+    pub fn is_syntax_error(&self) -> bool {
+        matches!(self, Error::Query { code, .. } if code == STATUS_SYNTAX)
     }
 }
 
@@ -416,6 +450,57 @@ mod tests {
     fn test_error_not_retryable_type() {
         let err = Error::Type("cast failed".to_string());
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_is_auth_error_class_28000() {
+        let err = Error::Query {
+            code: "28000".to_string(),
+            message: "invalid authorization specification".to_string(),
+        };
+        assert!(err.is_auth_error());
+    }
+
+    #[test]
+    fn test_is_auth_error_geode_08p01() {
+        let err = Error::Query {
+            code: "08P01".to_string(),
+            message: "password reset required".to_string(),
+        };
+        assert!(err.is_auth_error());
+    }
+
+    #[test]
+    fn test_is_auth_error_false_for_other_codes() {
+        let err = Error::Query {
+            code: "42000".to_string(),
+            message: "syntax error".to_string(),
+        };
+        assert!(!err.is_auth_error());
+
+        let err = Error::Connection("network".to_string());
+        assert!(!err.is_auth_error());
+    }
+
+    #[test]
+    fn test_is_syntax_error_class_42000() {
+        let err = Error::Query {
+            code: "42000".to_string(),
+            message: "syntax error".to_string(),
+        };
+        assert!(err.is_syntax_error());
+    }
+
+    #[test]
+    fn test_is_syntax_error_false_for_other_codes() {
+        let err = Error::Query {
+            code: "28000".to_string(),
+            message: "auth".to_string(),
+        };
+        assert!(!err.is_syntax_error());
+
+        let err = Error::Validation("bad".to_string());
+        assert!(!err.is_syntax_error());
     }
 
     #[test]

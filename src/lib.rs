@@ -76,7 +76,7 @@ pub mod grpc;
 pub use auth::{AuthClient, Permission, RLSPolicy, Role, SessionInfo, User};
 pub use client::{
     Client, Column, Connection, Page, PlanOperation, PreparedStatement, QueryPlan, QueryProfile,
-    Savepoint,
+    Savepoint, redact_dsn,
 };
 pub use dsn::{DEFAULT_PORT, Dsn, Transport};
 pub use error::{Error, Result};

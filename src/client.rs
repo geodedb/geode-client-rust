@@ -26,10 +26,24 @@ const DEFAULT_MAX_ROWS: usize = 1_000_000;
 /// Maximum number of pages to pull for a single query.
 const DEFAULT_MAX_PAGES: usize = 10_000;
 
-/// Redact password from a DSN string for safe inclusion in error messages.
-/// Handles both URL format (quic://user:pass@host) and query parameter format (?password=xxx).
-#[allow(dead_code)] // Used in tests
-fn redact_dsn(dsn: &str) -> String {
+/// Redact the password from a DSN string for safe inclusion in logs and
+/// error messages.
+///
+/// Handles both the URL credential format (`quic://user:pass@host`) and the
+/// query-parameter format (`?password=xxx` / `?pass=xxx`), replacing the
+/// secret with `[REDACTED]`. DSNs without credentials are returned
+/// unchanged. Mirrors the Go reference client's `RedactDSN`.
+///
+/// # Example
+///
+/// ```
+/// use geode_client::redact_dsn;
+///
+/// let safe = redact_dsn("quic://user:secret@host:3141");
+/// assert!(safe.contains("[REDACTED]"));
+/// assert!(!safe.contains("secret"));
+/// ```
+pub fn redact_dsn(dsn: &str) -> String {
     let mut result = dsn.to_string();
 
     // Handle URL format: scheme://user:password@host:port
