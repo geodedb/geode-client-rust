@@ -7,10 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.1-alpha.22] - 2026-06-01
+## [0.2.0] - 2026-06-01
 
 Parity-sync release: brings the Rust client to feature/behavior parity with
-the Go and Zig reference clients.
+the Go and Zig reference clients. Promoted from the `0.1.1-alpha` line to a
+`0.2.0` minor release to reflect the new public API surface (graph-native
+types, quoting helpers, error predicates, DSN round-trip, retry policy).
 
 ### Added
 
