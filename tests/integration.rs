@@ -1285,3 +1285,54 @@ async fn test_docker_query_builder() {
     cleanup_test_data(&mut conn).await;
     conn.close().unwrap();
 }
+
+// =============================================================================
+// No-match null-sentinel row tests (parity with Go aa67cb0)
+// =============================================================================
+
+/// A `MATCH` that finds nothing must return zero rows, not a single row of
+/// nulls. The Geode server emits a null-valued NODE/EDGE/PATH row as a
+/// no-match sentinel; the client must skip it.
+#[tokio::test]
+async fn test_no_match_returns_empty() {
+    let mut conn = get_test_connection().await;
+
+    // Ensure a clean graph, then match a label that does not exist.
+    cleanup_test_data(&mut conn).await;
+
+    let (page, _) = conn
+        .query("MATCH (n:NoSuchLabelThatDoesNotExist) RETURN n")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        page.rows.len(),
+        0,
+        "no-match query must yield zero rows, got {} (null-sentinel not skipped?)",
+        page.rows.len()
+    );
+
+    conn.close().unwrap();
+}
+
+/// A no-match path query must likewise return zero rows.
+#[tokio::test]
+async fn test_no_match_path_returns_empty() {
+    let mut conn = get_test_connection().await;
+
+    cleanup_test_data(&mut conn).await;
+
+    let (page, _) = conn
+        .query("MATCH p = (a:NoSuchA)-[:NOPE]->(b:NoSuchB) RETURN p")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        page.rows.len(),
+        0,
+        "no-match path query must yield zero rows, got {}",
+        page.rows.len()
+    );
+
+    conn.close().unwrap();
+}
