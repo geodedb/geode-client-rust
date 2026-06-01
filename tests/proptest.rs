@@ -5,7 +5,7 @@
 //!
 //! Run with: `cargo test --test proptest`
 
-use geode_client::{EdgeDirection, PatternBuilder, PredicateBuilder, QueryBuilder, Value};
+use geode_client::{Dsn, EdgeDirection, PatternBuilder, PredicateBuilder, QueryBuilder, Value};
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -442,5 +442,99 @@ proptest! {
         let _ = PredicateBuilder::new()
             .greater_than(&left, &right)
             .build_and();
+    }
+}
+
+// ============================================================================
+// DSN Round-trip Tests
+// ============================================================================
+
+/// Build a DSN string from generated components. Tokens are kept to a safe
+/// charset so the generated input itself parses; `to_dsn` is responsible for
+/// re-encoding on output.
+fn arb_dsn_string() -> impl Strategy<Value = String> {
+    (
+        prop_oneof![Just("quic"), Just("grpc")],
+        prop_oneof![
+            Just("localhost".to_string()),
+            Just("127.0.0.1".to_string()),
+            Just("host.example.com".to_string()),
+            Just("[::1]".to_string()),
+            Just("[2001:db8::1]".to_string()),
+        ],
+        1u16..=65535u16,
+        // optional username / password (alphanumeric tokens)
+        prop::option::of("[a-zA-Z][a-zA-Z0-9_]{0,10}"),
+        prop::option::of("[a-zA-Z0-9]{1,10}"),
+        // optional page_size (non-default values)
+        prop::option::of(1usize..=50_000usize),
+        // optional graph
+        prop::option::of("[a-zA-Z][a-zA-Z0-9_-]{0,12}"),
+        // tls disabled?
+        any::<bool>(),
+        // skip verify?
+        any::<bool>(),
+    )
+        .prop_map(
+            |(scheme, host, port, user, pass, page_size, graph, tls_off, skip)| {
+                let mut s = format!("{}://", scheme);
+                match (&user, &pass) {
+                    (Some(u), Some(p)) => s.push_str(&format!("{}:{}@", u, p)),
+                    (Some(u), None) => s.push_str(&format!("{}@", u)),
+                    // password-only is expressed as a query param below
+                    _ => {}
+                }
+                s.push_str(&format!("{}:{}", host, port));
+
+                let mut params: Vec<String> = Vec::new();
+                if let Some(ps) = page_size {
+                    params.push(format!("page_size={}", ps));
+                }
+                if let Some(g) = &graph {
+                    params.push(format!("graph={}", g));
+                }
+                if tls_off {
+                    params.push("tls=0".to_string());
+                }
+                if skip {
+                    params.push("insecure_tls_skip_verify=true".to_string());
+                }
+                if user.is_none() {
+                    if let Some(p) = &pass {
+                        params.push(format!("pass={}", p));
+                    }
+                }
+                if !params.is_empty() {
+                    s.push('?');
+                    s.push_str(&params.join("&"));
+                }
+                s
+            },
+        )
+}
+
+proptest! {
+    /// parse ∘ format is an identity: a parsed DSN, re-formatted via to_dsn
+    /// and parsed again, equals the original parsed DSN.
+    #[test]
+    fn dsn_format_parse_roundtrip(dsn_str in arb_dsn_string()) {
+        let parsed = Dsn::parse(&dsn_str)
+            .unwrap_or_else(|e| panic!("generated DSN {:?} failed to parse: {}", dsn_str, e));
+        let formatted = parsed.to_dsn();
+        let reparsed = Dsn::parse(&formatted)
+            .unwrap_or_else(|e| panic!("re-formatted DSN {:?} failed to parse: {}", formatted, e));
+        prop_assert_eq!(parsed, reparsed);
+    }
+
+    /// to_dsn output always starts with a supported scheme.
+    #[test]
+    fn dsn_to_dsn_has_scheme(dsn_str in arb_dsn_string()) {
+        let parsed = Dsn::parse(&dsn_str).unwrap();
+        let formatted = parsed.to_dsn();
+        prop_assert!(
+            formatted.starts_with("quic://") || formatted.starts_with("grpc://"),
+            "to_dsn output missing scheme: {}",
+            formatted
+        );
     }
 }

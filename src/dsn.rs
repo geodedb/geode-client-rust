@@ -54,7 +54,7 @@ impl std::fmt::Display for Transport {
 /// Parsed DSN (Data Source Name) for Geode connections.
 ///
 /// Contains all connection parameters extracted from a DSN string.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Dsn {
     transport: Transport,
     host: String,
@@ -478,6 +478,115 @@ impl Dsn {
         } else {
             format!("{}:{}", self.host, self.port)
         }
+    }
+
+    /// Format this DSN back into a connection-string form.
+    ///
+    /// Mirrors the Go reference client's `Config.FormatDSN`: emits
+    /// `scheme://userinfo@host:port?onlyNonDefaultParams`. Only parameters
+    /// that differ from the defaults are emitted, query keys are sorted for
+    /// determinism, and userinfo/values are percent-encoded.
+    ///
+    /// Credentials follow Go's rules: a username with a password becomes
+    /// `user:pass@`, a username alone becomes `user@`, and a password
+    /// without a username falls back to a `pass=` query parameter (since
+    /// userinfo cannot carry a password-only credential).
+    ///
+    /// The result round-trips through [`Dsn::parse`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use geode_client::dsn::Dsn;
+    ///
+    /// let dsn = Dsn::parse("quic://localhost:3141?page_size=500").unwrap();
+    /// let s = dsn.to_dsn();
+    /// assert_eq!(Dsn::parse(&s).unwrap(), dsn);
+    /// ```
+    pub fn to_dsn(&self) -> String {
+        let defaults = Dsn::default();
+
+        // Collect non-default query parameters as (key, value) pairs.
+        let mut params: Vec<(String, String)> = Vec::new();
+
+        if self.page_size != defaults.page_size {
+            params.push(("page_size".to_string(), self.page_size.to_string()));
+        }
+        if self.client_name != defaults.client_name {
+            params.push(("hello_name".to_string(), self.client_name.clone()));
+        }
+        if self.client_version != defaults.client_version {
+            params.push(("hello_ver".to_string(), self.client_version.clone()));
+        }
+        if self.conformance != defaults.conformance {
+            params.push(("conformance".to_string(), self.conformance.clone()));
+        }
+        if let Some(ca) = &self.ca_cert {
+            params.push(("ca".to_string(), ca.clone()));
+        }
+        if let Some(cert) = &self.client_cert {
+            params.push(("cert".to_string(), cert.clone()));
+        }
+        if let Some(key) = &self.client_key {
+            params.push(("key".to_string(), key.clone()));
+        }
+        if let Some(sn) = &self.server_name {
+            params.push(("server_name".to_string(), sn.clone()));
+        }
+        if self.skip_verify {
+            params.push(("insecure_tls_skip_verify".to_string(), "true".to_string()));
+        }
+        if !self.tls_enabled {
+            params.push(("tls".to_string(), "0".to_string()));
+        }
+        if let Some(graph) = &self.graph {
+            params.push(("graph".to_string(), graph.clone()));
+        }
+        if let Some(timeout) = self.connect_timeout_secs {
+            params.push(("connect_timeout".to_string(), timeout.to_string()));
+        }
+        // Preserve forward-compatible unknown options.
+        for (key, value) in &self.options {
+            params.push((key.clone(), value.clone()));
+        }
+
+        // Build userinfo, falling back to a pass= query param when only a
+        // password is present (userinfo requires a username).
+        let userinfo = match (&self.username, &self.password) {
+            (Some(user), Some(pass)) => format!(
+                "{}:{}@",
+                urlencoding::encode(user),
+                urlencoding::encode(pass)
+            ),
+            (Some(user), None) => format!("{}@", urlencoding::encode(user)),
+            (None, Some(pass)) => {
+                params.push(("pass".to_string(), pass.clone()));
+                String::new()
+            }
+            (None, None) => String::new(),
+        };
+
+        // Sort query keys for deterministic output (matches Go's url.Values).
+        params.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        let mut dsn = format!("{}://{}{}", self.transport, userinfo, self.address());
+
+        if !params.is_empty() {
+            let query: Vec<String> = params
+                .iter()
+                .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+                .collect();
+            dsn.push('?');
+            dsn.push_str(&query.join("&"));
+        }
+
+        dsn
+    }
+}
+
+impl std::fmt::Display for Dsn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_dsn())
     }
 }
 
@@ -977,6 +1086,98 @@ mod tests {
             debug_str.contains("REDACTED"),
             "Debug output must show REDACTED"
         );
+    }
+
+    // ==========================================================================
+    // DSN Round-trip (to_dsn) Tests
+    // ==========================================================================
+
+    fn assert_roundtrip(dsn_str: &str) {
+        let parsed = Dsn::parse(dsn_str).unwrap();
+        let formatted = parsed.to_dsn();
+        let reparsed = Dsn::parse(&formatted).unwrap_or_else(|e| {
+            panic!(
+                "reparse of {:?} (from {:?}) failed: {}",
+                formatted, dsn_str, e
+            )
+        });
+        assert_eq!(
+            parsed, reparsed,
+            "round-trip mismatch: {:?} -> {:?}",
+            dsn_str, formatted
+        );
+    }
+
+    #[test]
+    fn test_to_dsn_roundtrip_quic_basic() {
+        assert_roundtrip("quic://localhost:3141");
+    }
+
+    #[test]
+    fn test_to_dsn_roundtrip_grpc_tls_disabled() {
+        assert_roundtrip("grpc://127.0.0.1:50051?tls=0");
+    }
+
+    #[test]
+    fn test_to_dsn_roundtrip_page_size() {
+        assert_roundtrip("quic://localhost:3141?page_size=2500");
+    }
+
+    #[test]
+    fn test_to_dsn_roundtrip_graph() {
+        assert_roundtrip("quic://localhost:3141?graph=mygraph");
+    }
+
+    #[test]
+    fn test_to_dsn_roundtrip_userpass() {
+        assert_roundtrip("quic://admin:secret@localhost:3141");
+    }
+
+    #[test]
+    fn test_to_dsn_roundtrip_user_only() {
+        assert_roundtrip("quic://admin@localhost:3141");
+    }
+
+    #[test]
+    fn test_to_dsn_roundtrip_password_only() {
+        // password-only falls back to ?pass= (matches Go fix 6aee266)
+        let parsed = Dsn::parse("quic://localhost:3141?pass=secret").unwrap();
+        let formatted = parsed.to_dsn();
+        assert!(
+            formatted.contains("pass=secret"),
+            "password-only DSN should emit pass= query param, got: {}",
+            formatted
+        );
+        let reparsed = Dsn::parse(&formatted).unwrap();
+        assert_eq!(parsed, reparsed);
+        assert_eq!(reparsed.password(), Some("secret"));
+        assert_eq!(reparsed.username(), None);
+    }
+
+    #[test]
+    fn test_to_dsn_roundtrip_ipv6() {
+        assert_roundtrip("quic://[::1]:3141");
+        assert_roundtrip("grpc://[2001:db8::1]:50051?tls=0");
+    }
+
+    #[test]
+    fn test_to_dsn_roundtrip_skip_verify() {
+        assert_roundtrip("quic://localhost:3141?insecure_tls_skip_verify=true");
+    }
+
+    #[test]
+    fn test_to_dsn_roundtrip_full() {
+        assert_roundtrip(
+            "grpc://admin:p%40ss@host.example.com:50051?tls=0&page_size=500&conformance=full&graph=g1&connect_timeout=60",
+        );
+    }
+
+    #[test]
+    fn test_to_dsn_scheme_present() {
+        let dsn = Dsn::parse("grpc://localhost:50051").unwrap();
+        assert!(dsn.to_dsn().starts_with("grpc://"));
+        let dsn = Dsn::parse("quic://localhost:3141").unwrap();
+        assert!(dsn.to_dsn().starts_with("quic://"));
     }
 
     #[test]
