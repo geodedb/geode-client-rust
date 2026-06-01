@@ -1,4 +1,3 @@
-#![forbid(unsafe_code)]
 //! Geode Rust Client Library
 //!
 //! A high-performance async Rust client for Geode graph database with full GQL support.
@@ -54,11 +53,14 @@
 //! - `grpc://host:port?options` - gRPC transport
 //! - `host:port?options` - Legacy format, defaults to QUIC
 
+#![forbid(unsafe_code)]
+
 pub mod auth;
 pub mod client;
 mod convert;
 pub mod dsn;
 pub mod error;
+pub mod graph;
 pub mod pool;
 pub mod proto;
 pub mod query_builder;
@@ -77,6 +79,7 @@ pub use client::{
 };
 pub use dsn::{DEFAULT_PORT, Dsn, Transport};
 pub use error::{Error, Result};
+pub use graph::{Edge, Node, Path, as_edge, as_node, as_path};
 pub use pool::ConnectionPool;
 pub use query_builder::{EdgeDirection, PatternBuilder, PredicateBuilder, QueryBuilder};
 pub use types::{Range, Value, ValueKind};

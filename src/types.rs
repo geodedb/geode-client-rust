@@ -38,7 +38,7 @@ pub enum ValueKind {
 }
 
 /// Range type value
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Range {
     pub lower: Option<Box<Value>>,
     pub upper: Option<Box<Value>>,
@@ -46,7 +46,7 @@ pub struct Range {
 }
 
 /// Native representation of Geode values
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Value {
     pub kind: ValueKind,
     int_value: i64,
