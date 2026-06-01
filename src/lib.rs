@@ -64,6 +64,7 @@ pub mod graph;
 pub mod pool;
 pub mod proto;
 pub mod query_builder;
+pub mod quote;
 pub mod types;
 pub mod validate;
 
@@ -82,6 +83,7 @@ pub use error::{Error, Result};
 pub use graph::{Edge, Node, Path, as_edge, as_node, as_path};
 pub use pool::ConnectionPool;
 pub use query_builder::{EdgeDirection, PatternBuilder, PredicateBuilder, QueryBuilder};
+pub use quote::{quote_ident, quote_string, sanitize_graph_name};
 pub use types::{Range, Value, ValueKind};
 
 /// Library version
