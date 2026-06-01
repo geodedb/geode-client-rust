@@ -91,17 +91,6 @@ pub fn redact_dsn(dsn: &str) -> String {
     result
 }
 
-/// Reports whether a GQL column type string denotes a graph reference type
-/// (NODE, EDGE, or PATH). Matches case-insensitively and accepts the
-/// `RELATIONSHIP` alias for EDGE, mirroring the Go reference's
-/// `ParseGQLType`.
-fn is_reference_type(col_type: &str) -> bool {
-    col_type.eq_ignore_ascii_case("NODE")
-        || col_type.eq_ignore_ascii_case("EDGE")
-        || col_type.eq_ignore_ascii_case("RELATIONSHIP")
-        || col_type.eq_ignore_ascii_case("PATH")
-}
-
 /// A column definition in a query result set.
 ///
 /// Contains the column name and its GQL type as returned by the server.
@@ -1202,36 +1191,6 @@ impl Connection {
         .map_err(|_| Error::timeout())?
     }
 
-    /// Reports whether `proto_row` is a server-emitted no-match sentinel.
-    ///
-    /// The Geode server emits a single null-valued row for NODE/EDGE/PATH
-    /// columns when a `MATCH` finds no results, instead of an empty data
-    /// page. These rows must be skipped so that a no-match query surfaces
-    /// zero rows rather than one row of nulls (parity with Go fix
-    /// `aa67cb0`).
-    ///
-    /// A row is a no-match sentinel when it has at least one reference-typed
-    /// column (NODE/EDGE/PATH) and *every* such column is null or missing.
-    fn is_no_match_row(proto_row: &proto::Row, columns: &[Column]) -> bool {
-        if columns.is_empty() {
-            return false;
-        }
-        let mut has_ref_col = false;
-        for (i, col) in columns.iter().enumerate() {
-            if !is_reference_type(&col.col_type) {
-                continue;
-            }
-            has_ref_col = true;
-            if let Some(value) = proto_row.values.get(i) {
-                let is_null = matches!(value.kind, Some(proto::value::Kind::NullVal(_)) | None);
-                if !is_null {
-                    return false; // reference column has a real value
-                }
-            }
-        }
-        has_ref_col
-    }
-
     /// Parse protobuf rows into Value maps (static version for QUIC).
     fn parse_proto_rows_static(
         proto_rows: &[proto::Row],
@@ -1239,11 +1198,6 @@ impl Connection {
     ) -> Result<Vec<HashMap<String, Value>>> {
         let mut rows = Vec::with_capacity(proto_rows.len());
         for proto_row in proto_rows {
-            // Skip server-emitted no-match null-sentinel rows for
-            // NODE/EDGE/PATH columns (parity with Go fix aa67cb0).
-            if Self::is_no_match_row(proto_row, columns) {
-                continue;
-            }
             let mut row = HashMap::with_capacity(columns.len());
             for (i, col) in columns.iter().enumerate() {
                 let value = if i < proto_row.values.len() {
@@ -2933,7 +2887,7 @@ mod tests {
         assert_eq!(props.get("name").unwrap().as_string().unwrap(), "Alice");
     }
 
-    // No-match null-sentinel row tests (parity with Go aa67cb0)
+    // Row parsing tests
 
     fn null_proto_value() -> proto::Value {
         proto::Value {
@@ -2949,20 +2903,6 @@ mod tests {
                 properties: vec![],
             })),
         }
-    }
-
-    #[test]
-    fn test_no_match_node_sentinel_row_skipped() {
-        // MATCH (n:NoSuch) RETURN n yields a single null-valued NODE row.
-        let columns = vec![Column {
-            name: "n".to_string(),
-            col_type: "NODE".to_string(),
-        }];
-        let proto_rows = vec![proto::Row {
-            values: vec![null_proto_value()],
-        }];
-        let rows = Connection::parse_proto_rows_static(&proto_rows, &columns).unwrap();
-        assert!(rows.is_empty(), "null-sentinel NODE row must be skipped");
     }
 
     #[test]
@@ -2994,49 +2934,5 @@ mod tests {
         let rows = Connection::parse_proto_rows_static(&proto_rows, &columns).unwrap();
         assert_eq!(rows.len(), 1, "scalar null row must be kept");
         assert!(rows[0].get("x").unwrap().is_null());
-    }
-
-    #[test]
-    fn test_mixed_columns_node_null_but_scalar_present_kept() {
-        // If any reference column is null but the row also has a real
-        // reference value in another ref column, it is not a no-match row.
-        let columns = vec![
-            Column {
-                name: "a".to_string(),
-                col_type: "NODE".to_string(),
-            },
-            Column {
-                name: "b".to_string(),
-                col_type: "NODE".to_string(),
-            },
-        ];
-        let proto_rows = vec![proto::Row {
-            values: vec![null_proto_value(), node_proto_value(7)],
-        }];
-        let rows = Connection::parse_proto_rows_static(&proto_rows, &columns).unwrap();
-        assert_eq!(
-            rows.len(),
-            1,
-            "row with a real reference value must be kept"
-        );
-    }
-
-    #[test]
-    fn test_edge_and_path_sentinel_rows_skipped() {
-        for col_type in ["EDGE", "PATH", "RELATIONSHIP"] {
-            let columns = vec![Column {
-                name: "r".to_string(),
-                col_type: col_type.to_string(),
-            }];
-            let proto_rows = vec![proto::Row {
-                values: vec![null_proto_value()],
-            }];
-            let rows = Connection::parse_proto_rows_static(&proto_rows, &columns).unwrap();
-            assert!(
-                rows.is_empty(),
-                "null-sentinel {} row must be skipped",
-                col_type
-            );
-        }
     }
 }
