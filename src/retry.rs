@@ -52,12 +52,18 @@ impl RetryPolicy {
         let attempt = attempt.max(1);
         // initial_backoff * multiplier^(attempt-1)
         let factor = self.multiplier.powi((attempt - 1) as i32);
-        let nanos = self.initial_backoff.as_secs_f64() * factor;
+        let secs = self.initial_backoff.as_secs_f64() * factor;
         let max_secs = self.max_backoff.as_secs_f64();
-        if !nanos.is_finite() || nanos >= max_secs {
+        // A non-finite or over-cap result clamps to max_backoff. A negative
+        // result (possible if a caller sets a negative `multiplier`) clamps to
+        // zero so `Duration::from_secs_f64` never panics on a negative value.
+        if !secs.is_finite() || secs >= max_secs {
             return self.max_backoff;
         }
-        Duration::from_secs_f64(nanos)
+        if secs <= 0.0 {
+            return Duration::ZERO;
+        }
+        Duration::from_secs_f64(secs)
     }
 }
 
@@ -232,5 +238,25 @@ mod tests {
         // 1 * 2^4 = 16 > 10, clamped.
         assert_eq!(p.backoff(5), Duration::from_secs(10));
         assert_eq!(p.backoff(100), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_backoff_negative_multiplier_does_not_panic() {
+        // A negative multiplier yields a negative factor on even attempts;
+        // backoff must clamp to zero rather than panic in Duration::from_secs_f64.
+        let p = RetryPolicy {
+            max_attempts: 5,
+            initial_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(10),
+            multiplier: -2.0,
+        };
+        // attempt 2 => 1 * (-2)^1 = -2.0 => clamps to zero, no panic.
+        assert_eq!(p.backoff(2), Duration::ZERO);
+        // attempt 1 => 1 * (-2)^0 = 1.0 (positive).
+        assert_eq!(p.backoff(1), Duration::from_secs(1));
+        // exercise a range to be safe.
+        for attempt in 1..=5 {
+            let _ = p.backoff(attempt);
+        }
     }
 }

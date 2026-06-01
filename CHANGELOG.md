@@ -32,6 +32,15 @@ the Go and Zig reference clients.
 
 - QUIC paging finalized: buffered frame reader, trailer draining, and real
   PULL paging (page size + session id).
-- Skip server-emitted null-sentinel rows for `NODE`/`EDGE`/`PATH` columns so a
-  no-match `MATCH` returns zero rows instead of one row of nulls (parity with
-  Go fix `aa67cb0`).
+- `PATH` result values now decode into the `{nodes, edges}` object shape (a
+  `PathVal` conversion arm was missing), so `as_path` works against real
+  server data.
+
+### Notes
+
+- The Go null-sentinel no-match skip (`aa67cb0`) was evaluated and intentionally
+  not ported: the current Geode server (v0.6.x) already returns zero rows for a
+  no-match `MATCH`, so the heuristic was unnecessary and produced false
+  positives that dropped legitimate `CREATE ... RETURN` rows. Regression tests
+  (`test_no_match_returns_empty`, `test_no_match_path_returns_empty`) assert the
+  empty-result behavior.

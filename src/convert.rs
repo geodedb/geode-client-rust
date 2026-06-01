@@ -52,43 +52,22 @@ fn proto_to_value_with_depth(proto_val: &proto::Value, depth: usize) -> Value {
             }
             Value::object(obj)
         }
-        Some(proto::value::Kind::NodeVal(node)) => {
+        Some(proto::value::Kind::NodeVal(node)) => node_to_value(node, next_depth),
+        Some(proto::value::Kind::EdgeVal(edge)) => edge_to_value(edge, next_depth),
+        Some(proto::value::Kind::PathVal(path)) => {
             let mut obj = HashMap::new();
-            obj.insert("id".to_string(), Value::int(node.id as i64));
-            let labels: Vec<Value> = node
-                .labels
+            let nodes: Vec<Value> = path
+                .nodes
                 .iter()
-                .map(|l| Value::string(l.clone()))
+                .map(|n| node_to_value(n, next_depth))
                 .collect();
-            obj.insert("labels".to_string(), Value::array(labels));
-            let mut props = HashMap::new();
-            for entry in &node.properties {
-                let val = entry
-                    .value
-                    .as_ref()
-                    .map(|v| proto_to_value_with_depth(v, next_depth))
-                    .unwrap_or_else(Value::null);
-                props.insert(entry.key.clone(), val);
-            }
-            obj.insert("properties".to_string(), Value::object(props));
-            Value::object(obj)
-        }
-        Some(proto::value::Kind::EdgeVal(edge)) => {
-            let mut obj = HashMap::new();
-            obj.insert("id".to_string(), Value::int(edge.id as i64));
-            obj.insert("start_node".to_string(), Value::int(edge.from_id as i64));
-            obj.insert("end_node".to_string(), Value::int(edge.to_id as i64));
-            obj.insert("type".to_string(), Value::string(edge.label.clone()));
-            let mut props = HashMap::new();
-            for entry in &edge.properties {
-                let val = entry
-                    .value
-                    .as_ref()
-                    .map(|v| proto_to_value_with_depth(v, next_depth))
-                    .unwrap_or_else(Value::null);
-                props.insert(entry.key.clone(), val);
-            }
-            obj.insert("properties".to_string(), Value::object(props));
+            let edges: Vec<Value> = path
+                .edges
+                .iter()
+                .map(|e| edge_to_value(e, next_depth))
+                .collect();
+            obj.insert("nodes".to_string(), Value::array(nodes));
+            obj.insert("edges".to_string(), Value::array(edges));
             Value::object(obj)
         }
         Some(proto::value::Kind::DecimalVal(d)) => {
@@ -104,6 +83,52 @@ fn proto_to_value_with_depth(proto_val: &proto::Value, depth: usize) -> Value {
         }
         _ => Value::null(),
     }
+}
+
+/// Convert a protobuf `NodeValue` into the object-shaped `Value`
+/// (`{id, labels, properties}`) consumed by [`crate::graph::as_node`].
+fn node_to_value(node: &proto::NodeValue, depth: usize) -> Value {
+    let mut obj = HashMap::new();
+    obj.insert("id".to_string(), Value::int(node.id as i64));
+    let labels: Vec<Value> = node
+        .labels
+        .iter()
+        .map(|l| Value::string(l.clone()))
+        .collect();
+    obj.insert("labels".to_string(), Value::array(labels));
+    let mut props = HashMap::new();
+    for entry in &node.properties {
+        let val = entry
+            .value
+            .as_ref()
+            .map(|v| proto_to_value_with_depth(v, depth))
+            .unwrap_or_else(Value::null);
+        props.insert(entry.key.clone(), val);
+    }
+    obj.insert("properties".to_string(), Value::object(props));
+    Value::object(obj)
+}
+
+/// Convert a protobuf `EdgeValue` into the object-shaped `Value`
+/// (`{id, start_node, end_node, type, properties}`) consumed by
+/// [`crate::graph::as_edge`].
+fn edge_to_value(edge: &proto::EdgeValue, depth: usize) -> Value {
+    let mut obj = HashMap::new();
+    obj.insert("id".to_string(), Value::int(edge.id as i64));
+    obj.insert("start_node".to_string(), Value::int(edge.from_id as i64));
+    obj.insert("end_node".to_string(), Value::int(edge.to_id as i64));
+    obj.insert("type".to_string(), Value::string(edge.label.clone()));
+    let mut props = HashMap::new();
+    for entry in &edge.properties {
+        let val = entry
+            .value
+            .as_ref()
+            .map(|v| proto_to_value_with_depth(v, depth))
+            .unwrap_or_else(Value::null);
+        props.insert(entry.key.clone(), val);
+    }
+    obj.insert("properties".to_string(), Value::object(props));
+    Value::object(obj)
 }
 
 #[cfg(test)]
@@ -262,6 +287,50 @@ mod tests {
         assert_eq!(obj.get("type").unwrap().as_string().unwrap(), "KNOWS");
         assert_eq!(obj.get("start_node").unwrap().as_int().unwrap(), 1);
         assert_eq!(obj.get("end_node").unwrap().as_int().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_proto_to_value_path_decodes_for_as_path() {
+        // A server-emitted PATH value must decode into the {nodes, edges}
+        // object shape that crate::graph::as_path consumes (regression: the
+        // PathVal arm was previously missing, so paths decoded to null).
+        let path = proto::PathValue {
+            nodes: vec![
+                proto::NodeValue {
+                    id: 1,
+                    labels: vec!["Person".to_string()],
+                    properties: vec![],
+                },
+                proto::NodeValue {
+                    id: 2,
+                    labels: vec!["Person".to_string()],
+                    properties: vec![],
+                },
+            ],
+            edges: vec![proto::EdgeValue {
+                id: 10,
+                from_id: 1,
+                to_id: 2,
+                label: "KNOWS".to_string(),
+                properties: vec![],
+            }],
+        };
+        let proto_val = proto::Value {
+            kind: Some(proto::value::Kind::PathVal(path)),
+        };
+        let val = proto_to_value(&proto_val);
+        // Direct object-shape assertions.
+        let obj = val.as_object().unwrap();
+        assert_eq!(obj.get("nodes").unwrap().as_array().unwrap().len(), 2);
+        assert_eq!(obj.get("edges").unwrap().as_array().unwrap().len(), 1);
+        // End-to-end through the public graph accessor.
+        let parsed = crate::graph::as_path(&val).expect("PATH must decode via as_path");
+        assert_eq!(parsed.nodes.len(), 2);
+        assert_eq!(parsed.edges.len(), 1);
+        assert_eq!(parsed.nodes[0].id, 1);
+        assert_eq!(parsed.edges[0].edge_type, "KNOWS");
+        assert_eq!(parsed.edges[0].start_node, 1);
+        assert_eq!(parsed.edges[0].end_node, 2);
     }
 
     #[test]
