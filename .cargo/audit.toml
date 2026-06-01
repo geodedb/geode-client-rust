@@ -38,4 +38,18 @@ ignore = [
     # no impact in our controlled test environment.
     # Review date: 2026-02-06
     "RUSTSEC-2026-0009",
+
+    # RUSTSEC-2026-0097: rand unsound with a custom logger using `rand::rng()`
+    # Status: ACCEPTED RISK (Warning only; not applicable to our usage)
+    # Justification: This is an "unsound" warning, not a vulnerability. It
+    # affects rand 0.8.5, pulled in transitively via tonic 0.12 -> tower 0.4
+    # (load-balancing jitter) and rust_decimal. The unsoundness only manifests
+    # under a specific misuse — configuring a custom logger that calls
+    # `rand::rng()` — which this client never does (rand is purely a
+    # non-cryptographic transitive dependency, never used directly). No patched
+    # rand 0.8.x exists; the proper fix requires a major bump of tonic/tower,
+    # out of scope for this parity release. Revisit when tonic ships a release
+    # that uses rand 0.9.
+    # Review date: 2026-06-01
+    "RUSTSEC-2026-0097",
 ]
