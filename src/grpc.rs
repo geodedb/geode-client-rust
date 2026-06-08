@@ -253,6 +253,8 @@ impl GrpcClient {
             dsn.username(),
             dsn.password(),
             dsn.graph(),
+            dsn.tenant(),
+            dsn.role(),
         )
         .await?;
 
@@ -268,15 +270,18 @@ impl GrpcClient {
         username: Option<&str>,
         password: Option<&str>,
         graph: Option<&str>,
+        tenant: Option<&str>,
+        role: Option<&str>,
     ) -> Result<String> {
         let request = proto::HelloRequest {
             username: username.unwrap_or("").to_string(),
             password: password.unwrap_or("").to_string(),
-            tenant_id: None,
+            tenant_id: tenant.map(String::from),
             client_name: "geode-rust".to_string(),
             client_version: crate::VERSION.to_string(),
             wanted_conformance: "minimum".to_string(),
             graph: graph.map(String::from),
+            role: role.map(String::from),
         };
 
         let response = client

@@ -73,6 +73,10 @@ pub struct Dsn {
     server_name: Option<String>,
     connect_timeout_secs: Option<u64>,
     graph: Option<String>,
+    /// Tenant ID for multi-tenant isolation (sent in HELLO when set)
+    tenant: Option<String>,
+    /// FLE role for field-level access control (sent in HELLO when set)
+    role: Option<String>,
     options: HashMap<String, String>,
 }
 
@@ -96,6 +100,8 @@ impl Default for Dsn {
             server_name: None,
             connect_timeout_secs: None,
             graph: None,
+            tenant: None,
+            role: None,
             options: HashMap::new(),
         }
     }
@@ -371,6 +377,12 @@ impl Dsn {
                 "graph" => {
                     self.graph = Some(value.to_string());
                 }
+                "tenant" | "tenant_id" => {
+                    self.tenant = Some(value.to_string());
+                }
+                "role" => {
+                    self.role = Some(value.to_string());
+                }
                 _ => {
                     // Store unknown parameters for forward compatibility
                     self.options.insert(key.clone(), value.clone());
@@ -470,6 +482,16 @@ impl Dsn {
         self.graph.as_deref()
     }
 
+    /// Get the tenant ID if specified (multi-tenant isolation).
+    pub fn tenant(&self) -> Option<&str> {
+        self.tenant.as_deref()
+    }
+
+    /// Get the FLE role if specified (field-level access control).
+    pub fn role(&self) -> Option<&str> {
+        self.role.as_deref()
+    }
+
     /// Get the host:port address string.
     pub fn address(&self) -> String {
         if self.host.contains(':') {
@@ -542,6 +564,12 @@ impl Dsn {
         if let Some(graph) = &self.graph {
             params.push(("graph".to_string(), graph.clone()));
         }
+        if let Some(tenant) = &self.tenant {
+            params.push(("tenant".to_string(), tenant.clone()));
+        }
+        if let Some(role) = &self.role {
+            params.push(("role".to_string(), role.clone()));
+        }
         if let Some(timeout) = self.connect_timeout_secs {
             params.push(("connect_timeout".to_string(), timeout.to_string()));
         }
@@ -610,6 +638,8 @@ impl std::fmt::Debug for Dsn {
             .field("server_name", &self.server_name)
             .field("connect_timeout_secs", &self.connect_timeout_secs)
             .field("graph", &self.graph)
+            .field("tenant", &self.tenant)
+            .field("role", &self.role)
             .field("options", &self.options)
             .finish()
     }
@@ -1126,6 +1156,26 @@ mod tests {
     #[test]
     fn test_to_dsn_roundtrip_graph() {
         assert_roundtrip("quic://localhost:3141?graph=mygraph");
+    }
+
+    // GAP-0841: tenant + role flow through the DSN so multi-tenant + FLE work.
+    #[test]
+    fn test_dsn_parses_tenant_and_role_gap0841() {
+        let dsn = Dsn::parse("quic://localhost:3141?tenant=acme-corp&role=analyst").unwrap();
+        assert_eq!(dsn.tenant(), Some("acme-corp"));
+        assert_eq!(dsn.role(), Some("analyst"));
+    }
+
+    #[test]
+    fn test_dsn_tenant_id_alias_gap0841() {
+        // `tenant_id` is accepted as an alias for `tenant`.
+        let dsn = Dsn::parse("quic://localhost:3141?tenant_id=acme-corp").unwrap();
+        assert_eq!(dsn.tenant(), Some("acme-corp"));
+    }
+
+    #[test]
+    fn test_to_dsn_roundtrip_tenant_and_role_gap0841() {
+        assert_roundtrip("quic://localhost:3141?role=analyst&tenant=acme-corp");
     }
 
     #[test]

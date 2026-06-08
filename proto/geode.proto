@@ -82,6 +82,7 @@ message HelloRequest {
   string client_version = 5;
   string wanted_conformance = 6;
   optional string graph = 7;
+  optional string role = 8;       // FLE role for field-level access control
 }
 
 message HelloResponse {

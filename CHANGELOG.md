@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Multi-tenancy and FLE support in the HELLO handshake (GAP-0841): new
+  `Client::tenant` and `Client::role` builder methods, and `tenant` /
+  `tenant_id` / `role` DSN query parameters. When set, these are sent as
+  `HelloRequest.tenant_id` (field 3) and `HelloRequest.role` (field 8) on both
+  the QUIC and gRPC connect paths, so multi-tenant isolation and field-level
+  encryption work from the Rust client. Both fields stay unset (no wire bytes)
+  when not configured, preserving single-tenant / non-FLE behavior. Synced
+  `proto/geode.proto` to add `role = 8` to match the server canonical schema.
+
 ## [0.2.0] - 2026-06-01
 
 Parity-sync release: brings the Rust client to feature/behavior parity with

@@ -66,6 +66,7 @@ mod tests {
             client_version: String::new(),
             wanted_conformance: String::new(),
             graph: None,
+            role: None,
         };
         let msg = QuicClientMessage {
             msg: Some(quic_client_message::Msg::Hello(req)),
@@ -83,6 +84,59 @@ mod tests {
             }
             _ => panic!("Expected Hello variant"),
         }
+    }
+
+    /// GAP-0841: the HELLO handshake must carry both `tenant_id` (multi-tenancy)
+    /// and `role` (FLE field-level access control) so multi-tenant + FLE work
+    /// from the Rust client. This asserts both fields survive a protobuf
+    /// encode/decode round-trip on the wire wrapper (QuicClientMessage::Hello).
+    #[test]
+    fn test_hello_carries_tenant_and_role_gap0841() {
+        let req = HelloRequest {
+            username: "analyst".to_string(),
+            password: "secret".to_string(),
+            tenant_id: Some("acme-corp".to_string()),
+            client_name: "geode-rust".to_string(),
+            client_version: "0.2.0".to_string(),
+            wanted_conformance: "min".to_string(),
+            graph: Some("mygraph".to_string()),
+            role: Some("analyst-role".to_string()),
+        };
+        let msg = QuicClientMessage {
+            msg: Some(quic_client_message::Msg::Hello(req)),
+        };
+        let encoded = msg.encode_to_vec();
+
+        let decoded = QuicClientMessage::decode(encoded.as_slice()).unwrap();
+        match decoded.msg {
+            Some(quic_client_message::Msg::Hello(hello)) => {
+                assert_eq!(hello.tenant_id, Some("acme-corp".to_string()));
+                assert_eq!(hello.role, Some("analyst-role".to_string()));
+                assert_eq!(hello.graph, Some("mygraph".to_string()));
+            }
+            _ => panic!("Expected Hello variant"),
+        }
+    }
+
+    /// GAP-0841: when neither tenant nor role is configured, the optional
+    /// fields stay `None` (no wire bytes emitted) — backward compatible with a
+    /// single-tenant, non-FLE server.
+    #[test]
+    fn test_hello_omits_tenant_and_role_when_unset_gap0841() {
+        let req = HelloRequest {
+            username: "admin".to_string(),
+            password: "secret".to_string(),
+            tenant_id: None,
+            client_name: "geode-rust".to_string(),
+            client_version: "0.2.0".to_string(),
+            wanted_conformance: "min".to_string(),
+            graph: None,
+            role: None,
+        };
+        let encoded = req.encode_to_vec();
+        let decoded = HelloRequest::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.tenant_id, None);
+        assert_eq!(decoded.role, None);
     }
 
     #[test]

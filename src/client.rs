@@ -362,6 +362,10 @@ pub struct Client {
     password: Option<SecretString>,
     /// Graph name to bind on connection (sent in HELLO)
     graph: Option<String>,
+    /// Tenant ID for multi-tenant isolation (sent in HELLO when set)
+    tenant: Option<String>,
+    /// FLE role for field-level access control (sent in HELLO when set)
+    role: Option<String>,
     /// Connection timeout in seconds (default: 10)
     connect_timeout_secs: u64,
     /// HELLO handshake timeout in seconds (default: 5)
@@ -404,6 +408,8 @@ impl Client {
             username: None,
             password: None,
             graph: None,
+            tenant: None,
+            role: None,
             connect_timeout_secs: 10,
             hello_timeout_secs: 15,
             idle_timeout_secs: 30,
@@ -473,6 +479,8 @@ impl Client {
             username: dsn.username().map(String::from),
             password: dsn.password().map(|p| SecretString::from(p.to_string())),
             graph: dsn.graph().map(String::from),
+            tenant: dsn.tenant().map(String::from),
+            role: dsn.role().map(String::from),
             connect_timeout_secs: dsn.connect_timeout_secs().unwrap_or(10),
             hello_timeout_secs: 15,
             idle_timeout_secs: 30,
@@ -555,6 +563,34 @@ impl Client {
     /// * `graph` - Graph name to bind (e.g. "mygraph")
     pub fn graph(mut self, graph: impl Into<String>) -> Self {
         self.graph = Some(graph.into());
+        self
+    }
+
+    /// Set the tenant ID for multi-tenant isolation.
+    ///
+    /// When set, the tenant ID is sent in the HELLO message so the server
+    /// scopes the session's data access to the specified tenant. Required for
+    /// multi-tenant deployments (GAP-0841).
+    ///
+    /// # Arguments
+    ///
+    /// * `tenant` - Tenant identifier (e.g. "acme-corp")
+    pub fn tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = Some(tenant.into());
+        self
+    }
+
+    /// Set the FLE role for field-level access control.
+    ///
+    /// When set, the role is sent in the HELLO message so field-level
+    /// encryption (FLE) policies are evaluated against it. Required for FLE
+    /// deployments (GAP-0841).
+    ///
+    /// # Arguments
+    ///
+    /// * `role` - FLE role name (e.g. "analyst")
+    pub fn role(mut self, role: impl Into<String>) -> Self {
+        self.role = Some(role.into());
         self
     }
 
@@ -721,6 +757,8 @@ impl Client {
                     self.username.as_deref(),
                     password_ref,
                     self.graph.as_deref(),
+                    self.tenant.as_deref(),
+                    self.role.as_deref(),
                     self.connect_timeout_secs,
                     self.hello_timeout_secs,
                     self.idle_timeout_secs,
@@ -739,6 +777,8 @@ impl Client {
                         self.username.as_deref(),
                         password_ref,
                         self.graph.as_deref(),
+                        self.tenant.as_deref(),
+                        self.role.as_deref(),
                     )
                     .await
                 }
@@ -842,6 +882,8 @@ impl Connection {
         username: Option<&str>,
         password: Option<&str>,
         graph: Option<&str>,
+        tenant: Option<&str>,
+        role: Option<&str>,
         connect_timeout_secs: u64,
         hello_timeout_secs: u64,
         idle_timeout_secs: u64,
@@ -860,6 +902,8 @@ impl Connection {
                 username,
                 password,
                 graph,
+                tenant,
+                role,
                 connect_timeout_secs,
                 hello_timeout_secs,
                 idle_timeout_secs,
@@ -892,6 +936,8 @@ impl Connection {
         username: Option<&str>,
         password: Option<&str>,
         graph: Option<&str>,
+        tenant: Option<&str>,
+        role: Option<&str>,
     ) -> Result<Self> {
         use crate::dsn::Dsn;
 
@@ -900,15 +946,29 @@ impl Connection {
         let graph_suffix = graph
             .map(|g| format!("&graph={}", urlencoding::encode(g)))
             .unwrap_or_default();
+        let tenant_suffix = tenant
+            .map(|t| format!("&tenant={}", urlencoding::encode(t)))
+            .unwrap_or_default();
+        let role_suffix = role
+            .map(|r| format!("&role={}", urlencoding::encode(r)))
+            .unwrap_or_default();
         let dsn_str = if let (Some(user), Some(pass)) = (username, password) {
             format!(
-                "grpc://{}:{}@{}:{}?tls={}&insecure={}{}",
-                user, pass, host, port, tls_val, skip_verify, graph_suffix
+                "grpc://{}:{}@{}:{}?tls={}&insecure={}{}{}{}",
+                user,
+                pass,
+                host,
+                port,
+                tls_val,
+                skip_verify,
+                graph_suffix,
+                tenant_suffix,
+                role_suffix
             )
         } else {
             format!(
-                "grpc://{}:{}?tls={}&insecure={}{}",
-                host, port, tls_val, skip_verify, graph_suffix
+                "grpc://{}:{}?tls={}&insecure={}{}{}{}",
+                host, port, tls_val, skip_verify, graph_suffix, tenant_suffix, role_suffix
             )
         };
 
@@ -934,6 +994,8 @@ impl Connection {
         username: Option<&str>,
         password: Option<&str>,
         graph: Option<&str>,
+        tenant: Option<&str>,
+        role: Option<&str>,
         connect_timeout_secs: u64,
         hello_timeout_secs: u64,
         idle_timeout_secs: u64,
@@ -1071,11 +1133,12 @@ impl Connection {
         let hello_req = proto::HelloRequest {
             username: username.unwrap_or("").to_string(),
             password: password.unwrap_or("").to_string(),
-            tenant_id: None,
+            tenant_id: tenant.map(String::from),
             client_name: hello_name.to_string(),
             client_version: hello_ver.to_string(),
             wanted_conformance: conformance.to_string(),
             graph: graph.map(String::from),
+            role: role.map(String::from),
         };
         let msg = proto::QuicClientMessage {
             msg: Some(proto::quic_client_message::Msg::Hello(hello_req)),
