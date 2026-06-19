@@ -6,7 +6,7 @@
 CARGO ?= cargo
 CARGO_FLAGS ?=
 
-.PHONY: all build release test test-unit test-proptest test-doc test-integration bench fuzz lint fmt doc clean check ci help
+.PHONY: all build release test test-unit test-proptest test-doc test-integration bench fuzz lint fmt doc clean check ci help deps proto
 
 # Default target - run everything (except integration tests which require server)
 all: build fmt-check lint test-unit test-proptest test-doc doc bench-quick
@@ -32,6 +32,10 @@ help:
 	@echo "  make build          - Build debug version"
 	@echo "  make release        - Build release version"
 	@echo "  make clean          - Clean build artifacts"
+	@echo ""
+	@echo "Toolchain / codegen targets:"
+	@echo "  make deps           - Install protoc and regenerate proto code"
+	@echo "  make proto          - Regenerate src/generated/geode.rs from proto/geode.proto"
 	@echo ""
 	@echo "Test targets:"
 	@echo "  make test           - Run all tests (unit + proptest + doc)"
@@ -88,6 +92,53 @@ check:
 	@echo "Running cargo check..."
 	$(CARGO) check $(CARGO_FLAGS)
 	@echo "✓ Check complete"
+
+# =============================================================================
+# Toolchain / Codegen Targets
+# =============================================================================
+
+# Pinned protoc version used for reproducible codegen via the curl fallback.
+PROTOC_VERSION ?= 28.3
+
+# Install the protobuf compiler (protoc) and regenerate the vendored proto code.
+# Tries the system package manager first, then falls back to the official
+# release binary installed into ~/.local/bin (no root required).
+deps:
+	@if command -v protoc >/dev/null 2>&1; then \
+		echo "✓ protoc already installed: $$(protoc --version)"; \
+	elif command -v apt-get >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then \
+		echo "Installing protoc via apt-get..."; \
+		sudo apt-get update && sudo apt-get install -y protobuf-compiler; \
+	elif command -v brew >/dev/null 2>&1; then \
+		echo "Installing protoc via brew..."; brew install protobuf; \
+	elif command -v dnf >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then \
+		echo "Installing protoc via dnf..."; sudo dnf install -y protobuf-compiler; \
+	elif command -v pacman >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then \
+		echo "Installing protoc via pacman..."; sudo pacman -S --noconfirm protobuf; \
+	else \
+		echo "Installing protoc $(PROTOC_VERSION) release binary into ~/.local/bin..."; \
+		os=$$(uname -s); arch=$$(uname -m); \
+		case "$$os" in Linux) plat=linux ;; Darwin) plat=osx ;; *) echo "unsupported OS $$os"; exit 1 ;; esac; \
+		case "$$arch" in x86_64|amd64) parch=x86_64 ;; aarch64|arm64) parch=aarch_64 ;; *) echo "unsupported arch $$arch"; exit 1 ;; esac; \
+		tmp=$$(mktemp -d); \
+		curl -fsSL -o "$$tmp/protoc.zip" "https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/protoc-$(PROTOC_VERSION)-$$plat-$$parch.zip"; \
+		(command -v unzip >/dev/null 2>&1 && unzip -oq "$$tmp/protoc.zip" -d "$$tmp" || python3 -c "import zipfile,sys;zipfile.ZipFile('$$tmp/protoc.zip').extractall('$$tmp')"); \
+		mkdir -p "$$HOME/.local/bin"; install -m755 "$$tmp/bin/protoc" "$$HOME/.local/bin/protoc"; rm -rf "$$tmp"; \
+		echo "✓ protoc installed to ~/.local/bin (ensure it is on PATH)"; \
+	fi
+	@rustup component add rustfmt >/dev/null 2>&1 || true
+	$(MAKE) proto
+	@echo "✓ deps complete"
+
+# Regenerate src/generated/geode.rs from proto/geode.proto using protoc.
+# The generated code is checked in and used directly; run this after editing
+# proto/geode.proto. Requires protoc on PATH ('make deps' installs it).
+proto:
+	@command -v protoc >/dev/null 2>&1 || { echo "protoc not found on PATH — run 'make deps' first"; exit 1; }
+	@echo "Regenerating protobuf code from proto/geode.proto (protoc $$(protoc --version))..."
+	GENERATE_PROTO=1 $(CARGO) build $(CARGO_FLAGS)
+	$(CARGO) fmt
+	@echo "✓ Regenerated src/generated/geode.rs (run 'make test' to verify)"
 
 clean:
 	@echo "Cleaning build artifacts..."
