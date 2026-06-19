@@ -62,6 +62,7 @@ pub mod error;
 pub mod pool;
 pub mod proto;
 pub mod query_builder;
+pub mod schema;
 pub mod types;
 pub mod validate;
 
@@ -79,6 +80,7 @@ pub use dsn::{DEFAULT_PORT, Dsn, Transport};
 pub use error::{Error, Result};
 pub use pool::ConnectionPool;
 pub use query_builder::{EdgeDirection, PatternBuilder, PredicateBuilder, QueryBuilder};
+pub use schema::{Statement, parse_schema_fs};
 pub use types::{Range, Value, ValueKind};
 
 /// Library version

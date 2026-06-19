@@ -49,6 +49,7 @@ repos:
   - id: check-executables-have-shebangs
     exclude: ^(target/)
   - id: check-shebang-scripts-are-executable
+    exclude: \.rs$
 
   # =============================================================================
   # Shell script linting
