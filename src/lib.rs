@@ -55,6 +55,7 @@
 //! - `host:port?options` - Legacy format, defaults to QUIC
 
 pub mod auth;
+pub mod batch;
 pub mod client;
 mod convert;
 pub mod crypto;
@@ -75,6 +76,7 @@ pub mod grpc;
 
 // Re-export main types
 pub use auth::{AuthClient, Permission, RLSPolicy, Role, SessionInfo, User};
+pub use batch::{DEFAULT_CHUNK_SIZE, DEFAULT_MAX_WORKERS};
 pub use client::{
     Client, Column, Connection, Page, PlanOperation, PreparedStatement, QueryPlan, QueryProfile,
     Savepoint,

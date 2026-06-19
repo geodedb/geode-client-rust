@@ -1228,3 +1228,19 @@ async fn test_docker_query_builder() {
     cleanup_test_data(&mut conn).await;
     conn.close().unwrap();
 }
+
+#[cfg(feature = "integration")]
+#[tokio::test]
+async fn test_pool_batch_and_pipeline_exec() {
+    use geode_client::{ConnectionPool, Statement};
+    use std::sync::Arc;
+    let (host, port) = get_local_server_info();
+    let pool = Arc::new(
+        ConnectionPool::from_dsn(&format!("quic://{}:{}?insecure=true", host, port)).unwrap(),
+    );
+    let stmts: Vec<Statement> = (0..5)
+        .map(|i| Statement::new(format!("RETURN {} AS x", i)))
+        .collect();
+    pool.batch_exec(&stmts).await.unwrap();
+    pool.pipeline_exec(&stmts, 2, 4).await.unwrap();
+}

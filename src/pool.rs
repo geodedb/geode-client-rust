@@ -128,6 +128,53 @@ impl ConnectionPool {
         })
     }
 
+    /// Execute statements as a single batch in one transaction, with the
+    /// default retry policy. Acquires one connection from the pool.
+    ///
+    /// # Errors
+    /// Returns the first failing statement's error (the transaction is rolled
+    /// back). An empty slice is a no-op.
+    pub async fn batch_exec(&self, stmts: &[crate::schema::Statement]) -> Result<()> {
+        if stmts.is_empty() {
+            return Ok(());
+        }
+        let policy = crate::retry::RetryPolicy::default();
+        crate::retry::retry(policy, || async {
+            let mut conn = self.acquire().await?;
+            conn.begin().await?;
+            for (i, stmt) in stmts.iter().enumerate() {
+                if let Err(e) = conn.query(&stmt.query).await {
+                    let _ = conn.rollback().await;
+                    return Err(Error::query(format!("statement {}: {}", i + 1, e)));
+                }
+            }
+            conn.commit().await
+        })
+        .await
+    }
+
+    /// Execute statements concurrently in chunks, each chunk a single
+    /// transaction (via [`batch_exec`](Self::batch_exec) with retry). At most
+    /// `max_workers` chunks run at once. The first error stops dispatching new
+    /// chunks; in-flight chunks complete. `chunk_size`/`max_workers` of 0 use
+    /// the defaults (100 / 8).
+    ///
+    /// # Errors
+    /// Returns the first error recorded across all chunks.
+    pub async fn pipeline_exec(
+        self: &Arc<Self>,
+        stmts: &[crate::schema::Statement],
+        chunk_size: usize,
+        max_workers: usize,
+    ) -> Result<()> {
+        let pool = Arc::clone(self);
+        crate::batch::pipeline_drive(stmts, chunk_size, max_workers, move |chunk| {
+            let pool = Arc::clone(&pool);
+            async move { pool.batch_exec(&chunk).await }
+        })
+        .await
+    }
+
     /// Get current pool size
     pub async fn size(&self) -> usize {
         self.connections.lock().await.len()
