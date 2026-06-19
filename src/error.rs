@@ -60,6 +60,14 @@ pub enum Error {
     #[error("Limit exceeded: {0}")]
     Limit(String),
 
+    /// Invalid identifier (contains forbidden characters)
+    #[error("Invalid identifier: {0}")]
+    InvalidIdent(String),
+
+    /// Invalid string literal (contains forbidden characters)
+    #[error("Invalid string literal: {0}")]
+    InvalidString(String),
+
     /// Generic error
     #[error("{0}")]
     Other(String),
@@ -132,6 +140,16 @@ impl Error {
     /// Create an invalid DSN error
     pub fn invalid_dsn<S: Into<String>>(msg: S) -> Self {
         Error::InvalidDsn(msg.into())
+    }
+
+    /// Create an invalid identifier error
+    pub fn invalid_ident<S: Into<String>>(msg: S) -> Self {
+        Error::InvalidIdent(msg.into())
+    }
+
+    /// Create an invalid string literal error
+    pub fn invalid_string<S: Into<String>>(msg: S) -> Self {
+        Error::InvalidString(msg.into())
     }
 
     /// Check if the error is retryable
