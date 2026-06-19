@@ -66,6 +66,7 @@ mod tests {
             client_version: String::new(),
             wanted_conformance: String::new(),
             graph: None,
+            role: None,
         };
         let msg = QuicClientMessage {
             msg: Some(quic_client_message::Msg::Hello(req)),
@@ -83,6 +84,30 @@ mod tests {
             }
             _ => panic!("Expected Hello variant"),
         }
+    }
+
+    #[test]
+    fn test_hello_request_encodes_tenant_and_role() {
+        let req = HelloRequest {
+            username: "admin".to_string(),
+            password: "secret".to_string(),
+            tenant_id: Some("tenant1".to_string()),
+            client_name: String::new(),
+            client_version: String::new(),
+            wanted_conformance: String::new(),
+            graph: None,
+            role: Some("analyst".to_string()),
+        };
+        let encoded = req.encode_to_vec();
+        let decoded = HelloRequest::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.tenant_id, Some("tenant1".to_string()));
+        assert_eq!(decoded.role, Some("analyst".to_string()));
+
+        // Field 8 wire tag (8 << 3 | 2 == 0x42) must appear for the optional string role.
+        assert!(
+            encoded.windows(1).any(|w| w[0] == 0x42),
+            "expected wire tag for field 8 (role) in encoded bytes"
+        );
     }
 
     #[test]

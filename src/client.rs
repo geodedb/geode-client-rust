@@ -26,6 +26,32 @@ const DEFAULT_MAX_ROWS: usize = 1_000_000;
 /// Maximum number of pages to pull for a single query.
 const DEFAULT_MAX_PAGES: usize = 10_000;
 
+/// Build a HELLO request from connection parameters. Optional string fields
+/// (tenant_id, graph, role) are only populated when non-empty, matching the
+/// reference Go driver: an empty value means "omit from the wire".
+#[allow(clippy::too_many_arguments)]
+fn build_hello_request(
+    username: Option<&str>,
+    password: Option<&str>,
+    hello_name: &str,
+    hello_ver: &str,
+    conformance: &str,
+    graph: Option<&str>,
+    tenant_id: Option<&str>,
+    role: Option<&str>,
+) -> proto::HelloRequest {
+    proto::HelloRequest {
+        username: username.unwrap_or("").to_string(),
+        password: password.unwrap_or("").to_string(),
+        tenant_id: tenant_id.filter(|t| !t.is_empty()).map(String::from),
+        client_name: hello_name.to_string(),
+        client_version: hello_ver.to_string(),
+        wanted_conformance: conformance.to_string(),
+        graph: graph.filter(|g| !g.is_empty()).map(String::from),
+        role: role.filter(|r| !r.is_empty()).map(String::from),
+    }
+}
+
 /// Redact password from a DSN string for safe inclusion in error messages.
 /// Handles both URL format (quic://user:pass@host) and query parameter format (?password=xxx).
 #[allow(dead_code)] // Used in tests
@@ -348,6 +374,10 @@ pub struct Client {
     password: Option<SecretString>,
     /// Graph name to bind on connection (sent in HELLO)
     graph: Option<String>,
+    /// Tenant id sent in HELLO (field 3)
+    tenant_id: Option<String>,
+    /// Role sent in HELLO (field 8)
+    role: Option<String>,
     /// Connection timeout in seconds (default: 10)
     connect_timeout_secs: u64,
     /// HELLO handshake timeout in seconds (default: 5)
@@ -390,6 +420,8 @@ impl Client {
             username: None,
             password: None,
             graph: None,
+            tenant_id: None,
+            role: None,
             connect_timeout_secs: 10,
             hello_timeout_secs: 5,
             idle_timeout_secs: 30,
@@ -459,6 +491,8 @@ impl Client {
             username: dsn.username().map(String::from),
             password: dsn.password().map(|p| SecretString::from(p.to_string())),
             graph: dsn.graph().map(String::from),
+            tenant_id: dsn.tenant_id().map(String::from),
+            role: dsn.role().map(String::from),
             connect_timeout_secs: dsn.connect_timeout_secs().unwrap_or(10),
             hello_timeout_secs: 5,
             idle_timeout_secs: 30,
@@ -541,6 +575,18 @@ impl Client {
     /// * `graph` - Graph name to bind (e.g. "mygraph")
     pub fn graph(mut self, graph: impl Into<String>) -> Self {
         self.graph = Some(graph.into());
+        self
+    }
+
+    /// Set the tenant id to send in the HELLO message.
+    pub fn tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    /// Set the role to send in the HELLO message (field-level-encryption role).
+    pub fn role(mut self, role: impl Into<String>) -> Self {
+        self.role = Some(role.into());
         self
     }
 
@@ -707,6 +753,8 @@ impl Client {
                     self.username.as_deref(),
                     password_ref,
                     self.graph.as_deref(),
+                    self.tenant_id.as_deref(),
+                    self.role.as_deref(),
                     self.connect_timeout_secs,
                     self.hello_timeout_secs,
                     self.idle_timeout_secs,
@@ -826,6 +874,8 @@ impl Connection {
         username: Option<&str>,
         password: Option<&str>,
         graph: Option<&str>,
+        tenant_id: Option<&str>,
+        role: Option<&str>,
         connect_timeout_secs: u64,
         hello_timeout_secs: u64,
         idle_timeout_secs: u64,
@@ -844,6 +894,8 @@ impl Connection {
                 username,
                 password,
                 graph,
+                tenant_id,
+                role,
                 connect_timeout_secs,
                 hello_timeout_secs,
                 idle_timeout_secs,
@@ -918,6 +970,8 @@ impl Connection {
         username: Option<&str>,
         password: Option<&str>,
         graph: Option<&str>,
+        tenant_id: Option<&str>,
+        role: Option<&str>,
         connect_timeout_secs: u64,
         hello_timeout_secs: u64,
         idle_timeout_secs: u64,
@@ -1052,15 +1106,16 @@ impl Connection {
             .map_err(|e| Error::connection(format!("Failed to open stream: {}", e)))?;
 
         // Send HELLO message using protobuf with length prefix
-        let hello_req = proto::HelloRequest {
-            username: username.unwrap_or("").to_string(),
-            password: password.unwrap_or("").to_string(),
-            tenant_id: None,
-            client_name: hello_name.to_string(),
-            client_version: hello_ver.to_string(),
-            wanted_conformance: conformance.to_string(),
-            graph: graph.map(String::from),
-        };
+        let hello_req = build_hello_request(
+            username,
+            password,
+            hello_name,
+            hello_ver,
+            conformance,
+            graph,
+            tenant_id,
+            role,
+        );
         let msg = proto::QuicClientMessage {
             msg: Some(proto::quic_client_message::Msg::Hello(hello_req)),
         };
@@ -2683,6 +2738,51 @@ mod tests {
             .hello_timeout(10)
             .idle_timeout(60);
         assert!(client.validate().is_ok());
+    }
+
+    #[test]
+    fn test_build_hello_request_includes_tenant_and_role() {
+        use prost::Message;
+        let req = build_hello_request(
+            Some("admin"),
+            Some("secret"),
+            "geode-rust",
+            "0.1",
+            "min",
+            None,
+            Some("acme"),
+            Some("analyst"),
+        );
+        assert_eq!(req.tenant_id, Some("acme".to_string()));
+        assert_eq!(req.role, Some("analyst".to_string()));
+        let encoded = req.encode_to_vec();
+        let decoded = proto::HelloRequest::decode(encoded.as_slice()).unwrap();
+        assert_eq!(decoded.tenant_id.as_deref(), Some("acme"));
+        assert_eq!(decoded.role.as_deref(), Some("analyst"));
+    }
+
+    #[test]
+    fn test_build_hello_request_omits_empty_optionals() {
+        let req = build_hello_request(
+            Some("u"),
+            Some("p"),
+            "n",
+            "v",
+            "min",
+            Some(""),
+            Some(""),
+            Some(""),
+        );
+        assert_eq!(req.graph, None);
+        assert_eq!(req.tenant_id, None);
+        assert_eq!(req.role, None);
+    }
+
+    #[test]
+    fn test_client_tenant_role_builders() {
+        let _client = Client::new("localhost", 3141)
+            .tenant_id("acme")
+            .role("analyst");
     }
 
     // Gap #13: Test that extreme timeout values don't cause builder panics

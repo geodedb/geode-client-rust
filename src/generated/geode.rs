@@ -134,6 +134,8 @@ pub struct HelloRequest {
     pub wanted_conformance: ::prost::alloc::string::String,
     #[prost(string, optional, tag = "7")]
     pub graph: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "8")]
+    pub role: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HelloResponse {

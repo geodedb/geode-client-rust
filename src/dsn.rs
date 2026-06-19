@@ -73,6 +73,8 @@ pub struct Dsn {
     server_name: Option<String>,
     connect_timeout_secs: Option<u64>,
     graph: Option<String>,
+    tenant_id: Option<String>,
+    role: Option<String>,
     options: HashMap<String, String>,
 }
 
@@ -96,6 +98,8 @@ impl Default for Dsn {
             server_name: None,
             connect_timeout_secs: None,
             graph: None,
+            tenant_id: None,
+            role: None,
             options: HashMap::new(),
         }
     }
@@ -371,6 +375,12 @@ impl Dsn {
                 "graph" => {
                     self.graph = Some(value.to_string());
                 }
+                "tenant_id" | "tenant" => {
+                    self.tenant_id = Some(value.clone());
+                }
+                "role" => {
+                    self.role = Some(value.clone());
+                }
                 _ => {
                     // Store unknown parameters for forward compatibility
                     self.options.insert(key.clone(), value.clone());
@@ -470,6 +480,16 @@ impl Dsn {
         self.graph.as_deref()
     }
 
+    /// Get the tenant id if specified.
+    pub fn tenant_id(&self) -> Option<&str> {
+        self.tenant_id.as_deref()
+    }
+
+    /// Get the role if specified.
+    pub fn role(&self) -> Option<&str> {
+        self.role.as_deref()
+    }
+
     /// Get the host:port address string.
     pub fn address(&self) -> String {
         if self.host.contains(':') {
@@ -501,6 +521,8 @@ impl std::fmt::Debug for Dsn {
             .field("server_name", &self.server_name)
             .field("connect_timeout_secs", &self.connect_timeout_secs)
             .field("graph", &self.graph)
+            .field("tenant_id", &self.tenant_id)
+            .field("role", &self.role)
             .field("options", &self.options)
             .finish()
     }
@@ -977,6 +999,26 @@ mod tests {
             debug_str.contains("REDACTED"),
             "Debug output must show REDACTED"
         );
+    }
+
+    #[test]
+    fn test_dsn_parse_tenant_and_role() {
+        let dsn = Dsn::parse("quic://localhost:3141?tenant_id=acme&role=analyst").unwrap();
+        assert_eq!(dsn.tenant_id(), Some("acme"));
+        assert_eq!(dsn.role(), Some("analyst"));
+    }
+
+    #[test]
+    fn test_dsn_parse_tenant_alias() {
+        let dsn = Dsn::parse("quic://localhost:3141?tenant=acme").unwrap();
+        assert_eq!(dsn.tenant_id(), Some("acme"));
+    }
+
+    #[test]
+    fn test_dsn_tenant_role_default_none() {
+        let dsn = Dsn::parse("quic://localhost:3141").unwrap();
+        assert_eq!(dsn.tenant_id(), None);
+        assert_eq!(dsn.role(), None);
     }
 
     #[test]

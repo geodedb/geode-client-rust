@@ -77,7 +77,9 @@ impl GrpcClient {
         };
 
         // Perform handshake
-        client.handshake(dsn.username(), dsn.password(), dsn.graph()).await?;
+        client
+            .handshake(dsn.username(), dsn.password(), dsn.graph())
+            .await?;
 
         Ok(client)
     }
@@ -97,6 +99,7 @@ impl GrpcClient {
             client_version: crate::VERSION.to_string(),
             wanted_conformance: "minimum".to_string(),
             graph: graph.map(String::from),
+            role: None,
         };
 
         let response = self
