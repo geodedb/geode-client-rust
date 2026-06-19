@@ -649,6 +649,29 @@ fn bench_json_serialization(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Crypto Benchmarks
+// ============================================================================
+
+fn bench_crypto(c: &mut Criterion) {
+    use geode_client::Cipher;
+    let cipher = Cipher::new(&[b'k'; 32]).unwrap();
+    let plaintext = vec![0xABu8; 256];
+
+    let mut group = c.benchmark_group("crypto");
+    group.bench_function("encrypt_256b", |b| {
+        b.iter(|| black_box(cipher.encrypt(black_box(&plaintext)).unwrap()))
+    });
+    let ct = cipher.encrypt(&plaintext).unwrap();
+    group.bench_function("decrypt_256b", |b| {
+        b.iter(|| black_box(cipher.decrypt(black_box(&ct)).unwrap()))
+    });
+    group.bench_function("hmac_hex", |b| {
+        b.iter(|| black_box(cipher.hmac_hex(black_box("user@example.com"))))
+    });
+    group.finish();
+}
+
+// ============================================================================
 // Criterion Groups
 // ============================================================================
 
@@ -679,9 +702,12 @@ criterion_group!(
     bench_json_serialization,
 );
 
+criterion_group!(crypto_benches, bench_crypto);
+
 criterion_main!(
     type_benches,
     builder_benches,
     connection_benches,
-    parsing_benches
+    parsing_benches,
+    crypto_benches
 );

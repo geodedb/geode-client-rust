@@ -56,6 +56,15 @@ urlencoding = "2.1"
 # Hex encoding/decoding
 hex = "0.4"
 
+# Field-level encryption (FLE)
+aes-gcm = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+zeroize = { version = "1.8", features = ["derive"] }
+
 # Logging
 log = "0.4"
 
