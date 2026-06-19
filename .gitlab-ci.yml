@@ -111,7 +111,9 @@ security:cargo-audit:
   stage: security
   image: rust:1.85-bookworm
   before_script:
-    - cargo install cargo-audit --locked
+    # Pin to 0.22.1: cargo-audit 0.22.2+ requires rustc 1.88, but this job
+    # pins the MSRV image rust:1.85; 0.22.1 is the latest that supports 1.85.
+    - cargo install cargo-audit --version '=0.22.1' --locked
   script:
     - cargo audit --deny warnings
   cache:
