@@ -1,0 +1,4 @@
+-- edges
+MATCH (a),(b) MERGE (a)-[:KNOWS]->(b);
+SET something = 1
+DELETE (x)

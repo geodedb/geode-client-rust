@@ -1,0 +1,4 @@
+// node schema
+CREATE (a:Person {id: 1});
+CREATE (b:Person {id: 2})
+USE mygraph

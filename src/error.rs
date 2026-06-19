@@ -67,6 +67,12 @@ pub enum Error {
     #[error("Limit exceeded: {0}")]
     Limit(String),
 
+    /// No rows returned by a query expected to return at least one row.
+    ///
+    /// Mirrors the Go reference client's `ErrNoRows` sentinel.
+    #[error("no rows in result set")]
+    NoRows,
+
     /// Generic error
     #[error("{0}")]
     Other(String),
@@ -139,6 +145,11 @@ impl Error {
     /// Create an invalid DSN error
     pub fn invalid_dsn<S: Into<String>>(msg: S) -> Self {
         Error::InvalidDsn(msg.into())
+    }
+
+    /// Create a no-rows error.
+    pub fn no_rows() -> Self {
+        Error::NoRows
     }
 
     /// Check if the error is retryable
@@ -551,5 +562,15 @@ mod tests {
         let debug_str = format!("{:?}", err);
         assert!(debug_str.contains("Connection"));
         assert!(debug_str.contains("test"));
+    }
+
+    #[test]
+    fn test_no_rows() {
+        let err = Error::no_rows();
+        assert!(matches!(err, Error::NoRows));
+        assert_eq!(err.to_string(), "no rows in result set");
+        assert!(!err.is_retryable());
+        assert!(!err.is_auth_error());
+        assert!(!err.is_syntax_error());
     }
 }
