@@ -548,6 +548,7 @@ message CdcControlResponse {
 // ============================================================================
 message BackupRequest {
   string backup_type = 1; // "full"
+  string session_id = 2;
   bool compress = 3;
 }
 message BackupResponse {
@@ -562,6 +563,7 @@ message BackupResponse {
 message RestoreRequest {
   string target_time = 1;
   bool confirm = 2;
+  string session_id = 3;
 }
 message RestoreResponse {
   bool success = 1;
@@ -573,6 +575,10 @@ message RestoreResponse {
 message UploadBackupRequest {
   uint64 size_bytes = 1;
   string checksum = 2;
+  string session_id = 3;
+  // GAP-0880: full backup artifact bytes (GEOB header + payload). Required;
+  // metadata-only uploads are rejected by the server.
+  bytes payload = 4;
 }
 message UploadBackupResponse {
   bool success = 1;

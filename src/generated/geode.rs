@@ -855,6 +855,8 @@ pub struct BackupRequest {
     /// "full"
     #[prost(string, tag = "1")]
     pub backup_type: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub session_id: ::prost::alloc::string::String,
     #[prost(bool, tag = "3")]
     pub compress: bool,
 }
@@ -881,6 +883,8 @@ pub struct RestoreRequest {
     pub target_time: ::prost::alloc::string::String,
     #[prost(bool, tag = "2")]
     pub confirm: bool,
+    #[prost(string, tag = "3")]
+    pub session_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RestoreResponse {
@@ -901,6 +905,12 @@ pub struct UploadBackupRequest {
     pub size_bytes: u64,
     #[prost(string, tag = "2")]
     pub checksum: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub session_id: ::prost::alloc::string::String,
+    /// GAP-0880: full backup artifact bytes (GEOB header + payload). Required;
+    /// metadata-only uploads are rejected by the server.
+    #[prost(bytes = "vec", tag = "4")]
+    pub payload: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct UploadBackupResponse {
