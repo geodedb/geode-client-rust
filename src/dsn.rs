@@ -501,6 +501,87 @@ impl Dsn {
     }
 }
 
+impl std::fmt::Display for Dsn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Collect (key, value) params, then sort alphabetically by key to
+        // match Go's url.Values.Encode ordering.
+        let mut params: Vec<(String, String)> = Vec::new();
+
+        if self.page_size != 1000 {
+            params.push(("page_size".into(), self.page_size.to_string()));
+        }
+        if self.client_name != "geode-rust" {
+            params.push(("client_name".into(), self.client_name.clone()));
+        }
+        if self.client_version != env!("CARGO_PKG_VERSION") {
+            params.push(("client_version".into(), self.client_version.clone()));
+        }
+        if self.conformance != "min" {
+            params.push(("conformance".into(), self.conformance.clone()));
+        }
+        if let Some(ca) = &self.ca_cert {
+            params.push(("ca".into(), ca.clone()));
+        }
+        if let Some(cert) = &self.client_cert {
+            params.push(("cert".into(), cert.clone()));
+        }
+        if let Some(key) = &self.client_key {
+            params.push(("key".into(), key.clone()));
+        }
+        if self.skip_verify {
+            params.push(("insecure_tls_skip_verify".into(), "true".into()));
+        }
+        if !self.tls_enabled {
+            params.push(("tls".into(), "0".into()));
+        }
+        if let Some(graph) = &self.graph {
+            params.push(("graph".into(), graph.clone()));
+        }
+        if let Some(tenant) = &self.tenant_id {
+            params.push(("tenant".into(), tenant.clone()));
+        }
+        if let Some(role) = &self.role {
+            params.push(("role".into(), role.clone()));
+        }
+        if let Some(sn) = &self.server_name {
+            params.push(("server_name".into(), sn.clone()));
+        }
+        if let Some(t) = self.connect_timeout_secs {
+            params.push(("connect_timeout".into(), t.to_string()));
+        }
+
+        // Userinfo (password-only becomes a `pass` query param).
+        let userinfo = match (&self.username, &self.password) {
+            (Some(u), Some(p)) => format!("{}:{}@", urlencoding::encode(u), urlencoding::encode(p)),
+            (Some(u), None) => format!("{}@", urlencoding::encode(u)),
+            (None, Some(p)) => {
+                params.push(("pass".into(), p.clone()));
+                String::new()
+            }
+            (None, None) => String::new(),
+        };
+
+        params.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let host = if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        };
+
+        write!(f, "{}://{}{}", self.transport, userinfo, host)?;
+
+        if !params.is_empty() {
+            let query: Vec<String> = params
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
+                .collect();
+            write!(f, "?{}", query.join("&"))?;
+        }
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for Dsn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Dsn")
@@ -1029,5 +1110,67 @@ mod tests {
             debug_str.contains("password: None"),
             "Debug output should show None when no password is set"
         );
+    }
+
+    // ==========================================================================
+    // Display / FormatDSN Tests (Task 6)
+    // ==========================================================================
+
+    #[test]
+    fn test_dsn_format_basic_quic_omits_defaults() {
+        let dsn = Dsn::parse("quic://localhost:3141").unwrap();
+        // No non-default params, no userinfo.
+        assert_eq!(dsn.to_string(), "quic://localhost:3141");
+    }
+
+    #[test]
+    fn test_dsn_format_ipv6_bracketed() {
+        let dsn = Dsn::parse("grpc://[::1]:50051?tls=0").unwrap();
+        let s = dsn.to_string();
+        assert!(s.starts_with("grpc://[::1]:50051"), "got {}", s);
+        assert!(s.contains("tls=0"));
+    }
+
+    #[test]
+    fn test_dsn_format_params_sorted_and_nondefault() {
+        let dsn = Dsn::parse(
+            "quic://localhost:3141?page_size=500&conformance=full&graph=g&role=r&tenant_id=t",
+        )
+        .unwrap();
+        let s = dsn.to_string();
+        // Alphabetical key order: conformance, graph, page_size, role, tenant
+        let q = s.split('?').nth(1).unwrap();
+        let keys: Vec<&str> = q
+            .split('&')
+            .map(|kv| kv.split('=').next().unwrap())
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted, "params must be alphabetical: {}", q);
+        assert!(q.contains("page_size=500"));
+        assert!(q.contains("conformance=full"));
+        assert!(q.contains("tenant=t"));
+        assert!(q.contains("role=r"));
+    }
+
+    #[test]
+    fn test_dsn_format_userinfo() {
+        let dsn = Dsn::parse("quic://admin:secret@localhost:3141").unwrap();
+        let s = dsn.to_string();
+        assert!(s.contains("admin:secret@"), "got {}", s);
+    }
+
+    #[test]
+    fn test_dsn_format_roundtrip_reparse() {
+        let original = "grpc://localhost:50051?conformance=full&page_size=200&tls=0";
+        let dsn = Dsn::parse(original).unwrap();
+        let formatted = dsn.to_string();
+        let reparsed = Dsn::parse(&formatted).unwrap();
+        assert_eq!(reparsed.transport(), dsn.transport());
+        assert_eq!(reparsed.host(), dsn.host());
+        assert_eq!(reparsed.port(), dsn.port());
+        assert_eq!(reparsed.page_size(), dsn.page_size());
+        assert_eq!(reparsed.conformance(), dsn.conformance());
+        assert_eq!(reparsed.tls_enabled(), dsn.tls_enabled());
     }
 }

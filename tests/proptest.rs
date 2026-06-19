@@ -444,3 +444,33 @@ proptest! {
             .build_and();
     }
 }
+
+// ============================================================================
+// DSN Round-Trip Property Tests
+// ============================================================================
+
+proptest! {
+    #[test]
+    fn prop_dsn_roundtrip(
+        host in "[a-z][a-z0-9]{0,12}",
+        port in 1u16..=65535,
+        page_size in prop_oneof![Just(1000usize), 1usize..100_000],
+        tls in any::<bool>(),
+        conformance in prop_oneof![Just("min".to_string()), Just("full".to_string())],
+    ) {
+        use geode_client::Dsn;
+        let scheme = "grpc";
+        let mut dsn_str = format!("{}://{}:{}?page_size={}&conformance={}", scheme, host, port, page_size, conformance);
+        if !tls {
+            dsn_str.push_str("&tls=0");
+        }
+        let dsn = Dsn::parse(&dsn_str).unwrap();
+        let formatted = dsn.to_string();
+        let reparsed = Dsn::parse(&formatted).unwrap();
+        prop_assert_eq!(reparsed.host(), dsn.host());
+        prop_assert_eq!(reparsed.port(), dsn.port());
+        prop_assert_eq!(reparsed.page_size(), dsn.page_size());
+        prop_assert_eq!(reparsed.conformance(), dsn.conformance());
+        prop_assert_eq!(reparsed.tls_enabled(), dsn.tls_enabled());
+    }
+}
