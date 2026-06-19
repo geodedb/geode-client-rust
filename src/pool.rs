@@ -6,6 +6,9 @@ use tokio::sync::{Mutex, Semaphore};
 use crate::client::{Client, Connection};
 use crate::error::{Error, Result};
 
+/// Default maximum pool size, matching the Go driver's DefaultMaxOpenConns.
+pub const DEFAULT_POOL_MAX_SIZE: usize = 16;
+
 /// Connection pool for managing QUIC connections
 pub struct ConnectionPool {
     client: Client,
@@ -29,6 +32,41 @@ impl ConnectionPool {
         );
         Self {
             client: Client::new(host, port),
+            connections: Arc::new(Mutex::new(Vec::new())),
+            semaphore: Arc::new(Semaphore::new(max_size)),
+            max_size,
+        }
+    }
+
+    /// Build a pool from a DSN string using the default max size (16).
+    ///
+    /// # Errors
+    /// Returns an error if the DSN is invalid.
+    pub fn from_dsn(dsn: &str) -> Result<Self> {
+        Self::from_dsn_with_size(dsn, DEFAULT_POOL_MAX_SIZE)
+    }
+
+    /// Build a pool from a DSN string with an explicit max size.
+    ///
+    /// # Panics
+    /// Panics if `max_size` is 0 (a pool needs at least one slot).
+    ///
+    /// # Errors
+    /// Returns an error if the DSN is invalid.
+    pub fn from_dsn_with_size(dsn: &str, max_size: usize) -> Result<Self> {
+        assert!(max_size > 0, "ConnectionPool max_size must be at least 1");
+        let client = Client::from_dsn(dsn)?;
+        Ok(Self::from_client(client, max_size))
+    }
+
+    /// Build a pool from a pre-configured [`Client`].
+    ///
+    /// # Panics
+    /// Panics if `max_size` is 0.
+    pub fn from_client(client: Client, max_size: usize) -> Self {
+        assert!(max_size > 0, "ConnectionPool max_size must be at least 1");
+        Self {
+            client,
             connections: Arc::new(Mutex::new(Vec::new())),
             semaphore: Arc::new(Semaphore::new(max_size)),
             max_size,
@@ -100,6 +138,53 @@ impl ConnectionPool {
             pool: self.connections.clone(),
             _permit: permit,
         })
+    }
+
+    /// Execute statements as a single batch in one transaction, with the
+    /// default retry policy. Acquires one connection from the pool.
+    ///
+    /// # Errors
+    /// Returns the first failing statement's error (the transaction is rolled
+    /// back). An empty slice is a no-op.
+    pub async fn batch_exec(&self, stmts: &[crate::schema::Statement]) -> Result<()> {
+        if stmts.is_empty() {
+            return Ok(());
+        }
+        let policy = crate::retry::RetryPolicy::default();
+        crate::retry::retry(policy, || async {
+            let mut conn = self.acquire().await?;
+            conn.begin().await?;
+            for (i, stmt) in stmts.iter().enumerate() {
+                if let Err(e) = conn.query(&stmt.query).await {
+                    let _ = conn.rollback().await;
+                    return Err(Error::query(format!("statement {}: {}", i + 1, e)));
+                }
+            }
+            conn.commit().await
+        })
+        .await
+    }
+
+    /// Execute statements concurrently in chunks, each chunk a single
+    /// transaction (via [`batch_exec`](Self::batch_exec) with retry). At most
+    /// `max_workers` chunks run at once. The first error stops dispatching new
+    /// chunks; in-flight chunks complete. `chunk_size`/`max_workers` of 0 use
+    /// the defaults (100 / 8).
+    ///
+    /// # Errors
+    /// Returns the first error recorded across all chunks.
+    pub async fn pipeline_exec(
+        self: &Arc<Self>,
+        stmts: &[crate::schema::Statement],
+        chunk_size: usize,
+        max_workers: usize,
+    ) -> Result<()> {
+        let pool = Arc::clone(self);
+        crate::batch::pipeline_drive(stmts, chunk_size, max_workers, move |chunk| {
+            let pool = Arc::clone(&pool);
+            async move { pool.batch_exec(&chunk).await }
+        })
+        .await
     }
 
     /// Get current pool size
@@ -272,5 +357,42 @@ mod tests {
         // We can't directly access the mutex contents in a sync test,
         // but we verified size() returns 0 in the async test above
         assert_eq!(pool.max_size(), 10);
+    }
+
+    #[test]
+    fn test_pool_from_dsn() {
+        let pool = ConnectionPool::from_dsn("quic://localhost:3141?insecure=true").unwrap();
+        assert_eq!(pool.max_size(), 16); // DEFAULT_POOL_MAX_SIZE
+    }
+
+    #[test]
+    fn test_pool_from_dsn_with_size() {
+        let pool = ConnectionPool::from_dsn_with_size("grpc://localhost:50051?tls=0", 4).unwrap();
+        assert_eq!(pool.max_size(), 4);
+    }
+
+    #[test]
+    fn test_pool_from_dsn_invalid() {
+        assert!(ConnectionPool::from_dsn("http://localhost:1").is_err());
+    }
+
+    #[test]
+    fn test_pool_from_client() {
+        let client = Client::new("localhost", 3141).skip_verify(true);
+        let pool = ConnectionPool::from_client(client, 8);
+        assert_eq!(pool.max_size(), 8);
+    }
+
+    #[tokio::test]
+    async fn test_pool_batch_exec_empty_is_noop() {
+        let pool = ConnectionPool::new("localhost", 3141, 4);
+        // An empty statement slice must not touch the network.
+        assert!(pool.batch_exec(&[]).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pool_pipeline_exec_empty_is_noop() {
+        let pool = Arc::new(ConnectionPool::new("localhost", 3141, 4));
+        assert!(pool.pipeline_exec(&[], 0, 0).await.is_ok());
     }
 }
