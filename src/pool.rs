@@ -6,6 +6,9 @@ use tokio::sync::{Mutex, Semaphore};
 use crate::client::{Client, Connection};
 use crate::error::{Error, Result};
 
+/// Default maximum pool size, matching the Go driver's DefaultMaxOpenConns.
+pub const DEFAULT_POOL_MAX_SIZE: usize = 16;
+
 /// Connection pool for managing QUIC connections
 pub struct ConnectionPool {
     client: Client,
@@ -29,6 +32,41 @@ impl ConnectionPool {
         );
         Self {
             client: Client::new(host, port),
+            connections: Arc::new(Mutex::new(Vec::new())),
+            semaphore: Arc::new(Semaphore::new(max_size)),
+            max_size,
+        }
+    }
+
+    /// Build a pool from a DSN string using the default max size (16).
+    ///
+    /// # Errors
+    /// Returns an error if the DSN is invalid.
+    pub fn from_dsn(dsn: &str) -> Result<Self> {
+        Self::from_dsn_with_size(dsn, DEFAULT_POOL_MAX_SIZE)
+    }
+
+    /// Build a pool from a DSN string with an explicit max size.
+    ///
+    /// # Panics
+    /// Panics if `max_size` is 0 (a pool needs at least one slot).
+    ///
+    /// # Errors
+    /// Returns an error if the DSN is invalid.
+    pub fn from_dsn_with_size(dsn: &str, max_size: usize) -> Result<Self> {
+        assert!(max_size > 0, "ConnectionPool max_size must be at least 1");
+        let client = Client::from_dsn(dsn)?;
+        Ok(Self::from_client(client, max_size))
+    }
+
+    /// Build a pool from a pre-configured [`Client`].
+    ///
+    /// # Panics
+    /// Panics if `max_size` is 0.
+    pub fn from_client(client: Client, max_size: usize) -> Self {
+        assert!(max_size > 0, "ConnectionPool max_size must be at least 1");
+        Self {
+            client,
             connections: Arc::new(Mutex::new(Vec::new())),
             semaphore: Arc::new(Semaphore::new(max_size)),
             max_size,
@@ -260,5 +298,29 @@ mod tests {
         // We can't directly access the mutex contents in a sync test,
         // but we verified size() returns 0 in the async test above
         assert_eq!(pool.max_size(), 10);
+    }
+
+    #[test]
+    fn test_pool_from_dsn() {
+        let pool = ConnectionPool::from_dsn("quic://localhost:3141?insecure=true").unwrap();
+        assert_eq!(pool.max_size(), 16); // DEFAULT_POOL_MAX_SIZE
+    }
+
+    #[test]
+    fn test_pool_from_dsn_with_size() {
+        let pool = ConnectionPool::from_dsn_with_size("grpc://localhost:50051?tls=0", 4).unwrap();
+        assert_eq!(pool.max_size(), 4);
+    }
+
+    #[test]
+    fn test_pool_from_dsn_invalid() {
+        assert!(ConnectionPool::from_dsn("http://localhost:1").is_err());
+    }
+
+    #[test]
+    fn test_pool_from_client() {
+        let client = Client::new("localhost", 3141).skip_verify(true);
+        let pool = ConnectionPool::from_client(client, 8);
+        assert_eq!(pool.max_size(), 8);
     }
 }
