@@ -100,6 +100,12 @@ check:
 # Pinned protoc version used for reproducible codegen via the curl fallback.
 PROTOC_VERSION ?= 28.3
 
+# Canonical proto: single source of truth in the geode server repo. Override
+# with `make proto CANONICAL_PROTO=/path/to/geode.proto`. When unset, common
+# checkout-relative locations are searched; if none exist the vendored
+# proto/geode.proto is used as-is.
+CANONICAL_PROTO ?=
+
 # Install the protobuf compiler (protoc) and regenerate the vendored proto code.
 # Tries the system package manager first, then falls back to the official
 # release binary installed into ~/.local/bin (no root required).
@@ -135,6 +141,17 @@ deps:
 # proto/geode.proto. Requires protoc on PATH ('make deps' installs it).
 proto:
 	@command -v protoc >/dev/null 2>&1 || { echo "protoc not found on PATH — run 'make deps' first"; exit 1; }
+	@canon="$(CANONICAL_PROTO)"; \
+	if [ -z "$$canon" ]; then \
+		for c in ../geode/src/proto/geode.proto ../../geode/src/proto/geode.proto ../../../geode/src/proto/geode.proto; do \
+			[ -f "$$c" ] && canon="$$c" && break; \
+		done; \
+	fi; \
+	if [ -n "$$canon" ] && [ -f "$$canon" ]; then \
+		echo "Syncing canonical proto from $$canon"; cp "$$canon" proto/geode.proto; \
+	else \
+		echo "Canonical proto not found; using vendored proto/geode.proto"; \
+	fi
 	@echo "Regenerating protobuf code from proto/geode.proto (protoc $$(protoc --version))..."
 	GENERATE_PROTO=1 $(CARGO) build $(CARGO_FLAGS)
 	$(CARGO) fmt
