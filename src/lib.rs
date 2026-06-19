@@ -58,6 +58,7 @@
 pub mod auth;
 pub mod client;
 mod convert;
+pub mod crypto;
 pub mod dsn;
 pub mod error;
 pub mod graph;
@@ -80,6 +81,7 @@ pub use client::{
     Client, Column, Connection, Page, PlanOperation, PreparedStatement, QueryPlan, QueryProfile,
     Savepoint, redact_dsn,
 };
+pub use crypto::Cipher;
 pub use dsn::{DEFAULT_PORT, Dsn, Transport};
 pub use error::{Error, Result};
 pub use graph::{Edge, Node, Path, as_edge, as_node, as_path};

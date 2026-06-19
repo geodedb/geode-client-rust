@@ -51,3 +51,10 @@ path = "fuzz_targets/fuzz_json_parsing.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_crypto_roundtrip"
+path = "fuzz_targets/fuzz_crypto_roundtrip.rs"
+test = false
+doc = false
+bench = false
