@@ -68,6 +68,10 @@ pub enum Error {
     #[error("Invalid string literal: {0}")]
     InvalidString(String),
 
+    /// No rows returned by a query expected to return at least one row.
+    #[error("no rows in result set")]
+    NoRows,
+
     /// Generic error
     #[error("{0}")]
     Other(String),
@@ -174,12 +178,40 @@ impl Error {
         }
     }
 
+    /// Create a no-rows error.
+    pub fn no_rows() -> Self {
+        Error::NoRows
+    }
+
     /// Get the error code if this is a query error
     pub fn code(&self) -> Option<&str> {
         match self {
             Error::Query { code, .. } => Some(code),
             _ => None,
         }
+    }
+
+    /// Returns the ISO/IEC 39075 status class for query errors.
+    fn status_class(&self) -> Option<&str> {
+        match self {
+            Error::Query { code, .. } => Some(code.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this error represents an authentication/authorization
+    /// failure (status class 28000 or the Geode-specific 08P01), or an
+    /// [`Error::Auth`] variant.
+    pub fn is_auth_error(&self) -> bool {
+        if matches!(self, Error::Auth(_)) {
+            return true;
+        }
+        matches!(self.status_class(), Some("28000") | Some("08P01"))
+    }
+
+    /// Returns true if this error represents a syntax error (status class 42000).
+    pub fn is_syntax_error(&self) -> bool {
+        self.status_class() == Some("42000")
     }
 }
 
@@ -465,6 +497,60 @@ mod tests {
             Err(Error::Other("test".to_string()))
         }
         assert!(returns_error().is_err());
+    }
+
+    #[test]
+    fn test_error_no_rows() {
+        let err = Error::no_rows();
+        assert!(matches!(err, Error::NoRows));
+        assert_eq!(err.to_string(), "no rows in result set");
+    }
+
+    #[test]
+    fn test_is_auth_error() {
+        assert!(
+            Error::Query {
+                code: "28000".into(),
+                message: "x".into()
+            }
+            .is_auth_error()
+        );
+        assert!(
+            Error::Query {
+                code: "08P01".into(),
+                message: "x".into()
+            }
+            .is_auth_error()
+        );
+        assert!(
+            !Error::Query {
+                code: "42000".into(),
+                message: "x".into()
+            }
+            .is_auth_error()
+        );
+        assert!(!Error::Connection("x".into()).is_auth_error());
+        // Auth variant also classifies as auth error.
+        assert!(Error::Auth("bad".into()).is_auth_error());
+    }
+
+    #[test]
+    fn test_is_syntax_error() {
+        assert!(
+            Error::Query {
+                code: "42000".into(),
+                message: "x".into()
+            }
+            .is_syntax_error()
+        );
+        assert!(
+            !Error::Query {
+                code: "28000".into(),
+                message: "x".into()
+            }
+            .is_syntax_error()
+        );
+        assert!(!Error::Connection("x".into()).is_syntax_error());
     }
 
     #[test]
