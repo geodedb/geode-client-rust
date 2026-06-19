@@ -2805,16 +2805,11 @@ mod tests {
             label: "KNOWS".to_string(),
             properties: vec![],
         };
-        let proto_val = proto::Value {
+        let val = crate::convert::proto_to_value(&proto::Value {
             kind: Some(proto::value::Kind::EdgeVal(edge)),
-        };
-        let val = crate::convert::proto_to_value(&proto_val);
-        let obj = val.as_object().unwrap();
-        assert_eq!(obj.get("type").unwrap().as_string().unwrap(), "KNOWS");
-        assert!(
-            obj.get("label").is_none(),
-            "edge should not have 'label' field"
-        );
+        });
+        let e = val.as_edge().unwrap();
+        assert_eq!(e.edge_type, "KNOWS");
     }
 
     #[test]
@@ -2826,15 +2821,12 @@ mod tests {
             label: "LIKES".to_string(),
             properties: vec![],
         };
-        let proto_val = proto::Value {
+        let val = crate::convert::proto_to_value(&proto::Value {
             kind: Some(proto::value::Kind::EdgeVal(edge)),
-        };
-        let val = crate::convert::proto_to_value(&proto_val);
-        let obj = val.as_object().unwrap();
-        assert_eq!(obj.get("start_node").unwrap().as_int().unwrap(), 42);
-        assert_eq!(obj.get("end_node").unwrap().as_int().unwrap(), 99);
-        assert!(obj.get("from_id").is_none());
-        assert!(obj.get("to_id").is_none());
+        });
+        let e = val.as_edge().unwrap();
+        assert_eq!(e.start_node, 42);
+        assert_eq!(e.end_node, 99);
     }
 
     #[test]
@@ -2854,13 +2846,11 @@ mod tests {
                 }),
             }],
         };
-        let proto_val = proto::Value {
+        let val = crate::convert::proto_to_value(&proto::Value {
             kind: Some(proto::value::Kind::EdgeVal(edge)),
-        };
-        let val = crate::convert::proto_to_value(&proto_val);
-        let obj = val.as_object().unwrap();
-        let props = obj.get("properties").unwrap().as_object().unwrap();
-        assert_eq!(props.get("since").unwrap().as_int().unwrap(), 2020);
+        });
+        let e = val.as_edge().unwrap();
+        assert_eq!(e.properties.get("since").unwrap().as_int().unwrap(), 2020);
     }
 
     #[test]
@@ -2878,15 +2868,15 @@ mod tests {
                 }),
             }],
         };
-        let proto_val = proto::Value {
+        let val = crate::convert::proto_to_value(&proto::Value {
             kind: Some(proto::value::Kind::NodeVal(node)),
-        };
-        let val = crate::convert::proto_to_value(&proto_val);
-        let obj = val.as_object().unwrap();
-        assert_eq!(obj.get("id").unwrap().as_int().unwrap(), 42);
-        let labels = obj.get("labels").unwrap().as_array().unwrap();
-        assert_eq!(labels.len(), 1);
-        let props = obj.get("properties").unwrap().as_object().unwrap();
-        assert_eq!(props.get("name").unwrap().as_string().unwrap(), "Alice");
+        });
+        let n = val.as_node().unwrap();
+        assert_eq!(n.id, 42);
+        assert_eq!(n.labels.len(), 1);
+        assert_eq!(
+            n.properties.get("name").unwrap().as_string().unwrap(),
+            "Alice"
+        );
     }
 }

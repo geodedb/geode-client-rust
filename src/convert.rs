@@ -3,10 +3,41 @@
 use std::collections::HashMap;
 
 use crate::proto;
-use crate::types::Value;
+use crate::types::{Edge, Node, Value};
 
 /// Maximum recursion depth for converting nested protobuf values (CWE-674).
 const MAX_PROTO_RECURSION_DEPTH: usize = 64;
+
+fn convert_props(entries: &[proto::MapEntry], depth: usize) -> HashMap<String, Value> {
+    let mut props = HashMap::new();
+    for entry in entries {
+        let val = entry
+            .value
+            .as_ref()
+            .map(|v| proto_to_value_with_depth(v, depth))
+            .unwrap_or_else(Value::null);
+        props.insert(entry.key.clone(), val);
+    }
+    props
+}
+
+fn convert_node(node: &proto::NodeValue, depth: usize) -> Node {
+    Node {
+        id: node.id as i64,
+        labels: node.labels.clone(),
+        properties: convert_props(&node.properties, depth),
+    }
+}
+
+fn convert_edge(edge: &proto::EdgeValue, depth: usize) -> Edge {
+    Edge {
+        id: edge.id as i64,
+        start_node: edge.from_id as i64,
+        end_node: edge.to_id as i64,
+        edge_type: edge.label.clone(),
+        properties: convert_props(&edge.properties, depth),
+    }
+}
 
 /// Convert a protobuf Value to our Value type.
 #[inline]
@@ -52,44 +83,20 @@ fn proto_to_value_with_depth(proto_val: &proto::Value, depth: usize) -> Value {
             }
             Value::object(obj)
         }
-        Some(proto::value::Kind::NodeVal(node)) => {
-            let mut obj = HashMap::new();
-            obj.insert("id".to_string(), Value::int(node.id as i64));
-            let labels: Vec<Value> = node
-                .labels
+        Some(proto::value::Kind::NodeVal(node)) => Value::node(convert_node(node, next_depth)),
+        Some(proto::value::Kind::EdgeVal(edge)) => Value::edge(convert_edge(edge, next_depth)),
+        Some(proto::value::Kind::PathVal(path)) => {
+            let nodes = path
+                .nodes
                 .iter()
-                .map(|l| Value::string(l.clone()))
+                .map(|n| convert_node(n, next_depth))
                 .collect();
-            obj.insert("labels".to_string(), Value::array(labels));
-            let mut props = HashMap::new();
-            for entry in &node.properties {
-                let val = entry
-                    .value
-                    .as_ref()
-                    .map(|v| proto_to_value_with_depth(v, next_depth))
-                    .unwrap_or_else(Value::null);
-                props.insert(entry.key.clone(), val);
-            }
-            obj.insert("properties".to_string(), Value::object(props));
-            Value::object(obj)
-        }
-        Some(proto::value::Kind::EdgeVal(edge)) => {
-            let mut obj = HashMap::new();
-            obj.insert("id".to_string(), Value::int(edge.id as i64));
-            obj.insert("start_node".to_string(), Value::int(edge.from_id as i64));
-            obj.insert("end_node".to_string(), Value::int(edge.to_id as i64));
-            obj.insert("type".to_string(), Value::string(edge.label.clone()));
-            let mut props = HashMap::new();
-            for entry in &edge.properties {
-                let val = entry
-                    .value
-                    .as_ref()
-                    .map(|v| proto_to_value_with_depth(v, next_depth))
-                    .unwrap_or_else(Value::null);
-                props.insert(entry.key.clone(), val);
-            }
-            obj.insert("properties".to_string(), Value::object(props));
-            Value::object(obj)
+            let edges = path
+                .edges
+                .iter()
+                .map(|e| convert_edge(e, next_depth))
+                .collect();
+            Value::path(crate::types::Path { nodes, edges })
         }
         Some(proto::value::Kind::DecimalVal(d)) => {
             // Try to parse the decimal from coeff + scale
@@ -233,16 +240,16 @@ mod tests {
                 }),
             }],
         };
-        let proto_val = proto::Value {
+        let val = proto_to_value(&proto::Value {
             kind: Some(proto::value::Kind::NodeVal(node)),
-        };
-        let val = proto_to_value(&proto_val);
-        let obj = val.as_object().unwrap();
-        assert_eq!(obj.get("id").unwrap().as_int().unwrap(), 42);
-        let labels = obj.get("labels").unwrap().as_array().unwrap();
-        assert_eq!(labels.len(), 1);
-        let props = obj.get("properties").unwrap().as_object().unwrap();
-        assert_eq!(props.get("name").unwrap().as_string().unwrap(), "Alice");
+        });
+        let n = val.as_node().unwrap();
+        assert_eq!(n.id, 42);
+        assert_eq!(n.labels, vec!["Person".to_string()]);
+        assert_eq!(
+            n.properties.get("name").unwrap().as_string().unwrap(),
+            "Alice"
+        );
     }
 
     #[test]
@@ -254,14 +261,46 @@ mod tests {
             label: "KNOWS".to_string(),
             properties: vec![],
         };
-        let proto_val = proto::Value {
+        let val = proto_to_value(&proto::Value {
             kind: Some(proto::value::Kind::EdgeVal(edge)),
+        });
+        let e = val.as_edge().unwrap();
+        assert_eq!(e.edge_type, "KNOWS");
+        assert_eq!(e.start_node, 1);
+        assert_eq!(e.end_node, 2);
+    }
+
+    #[test]
+    fn test_proto_to_value_path_assembly() {
+        let n0 = proto::NodeValue {
+            id: 1,
+            labels: vec!["A".into()],
+            properties: vec![],
         };
-        let val = proto_to_value(&proto_val);
-        let obj = val.as_object().unwrap();
-        assert_eq!(obj.get("type").unwrap().as_string().unwrap(), "KNOWS");
-        assert_eq!(obj.get("start_node").unwrap().as_int().unwrap(), 1);
-        assert_eq!(obj.get("end_node").unwrap().as_int().unwrap(), 2);
+        let n1 = proto::NodeValue {
+            id: 2,
+            labels: vec!["B".into()],
+            properties: vec![],
+        };
+        let e = proto::EdgeValue {
+            id: 9,
+            from_id: 1,
+            to_id: 2,
+            label: "R".into(),
+            properties: vec![],
+        };
+        let path = proto::PathValue {
+            nodes: vec![n0, n1],
+            edges: vec![e],
+        };
+        let val = proto_to_value(&proto::Value {
+            kind: Some(proto::value::Kind::PathVal(path)),
+        });
+        let p = val.as_path().unwrap();
+        assert_eq!(p.nodes.len(), 2);
+        assert_eq!(p.edges.len(), 1);
+        assert_eq!(p.edges[0].start_node, 1);
+        assert_eq!(p.edges[0].end_node, 2);
     }
 
     #[test]

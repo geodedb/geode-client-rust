@@ -85,7 +85,7 @@ pub use query_builder::{EdgeDirection, PatternBuilder, PredicateBuilder, QueryBu
 pub use quote::{quote_ident, quote_string, sanitize_graph_name};
 pub use retry::{RetryPolicy, retry};
 pub use schema::{Statement, parse_schema_fs};
-pub use types::{Range, Value, ValueKind};
+pub use types::{Edge, Node, Path, Range, Value, ValueKind};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

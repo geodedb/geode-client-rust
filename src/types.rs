@@ -35,6 +35,34 @@ pub enum ValueKind {
     Enum,
     BitString,
     Range,
+    Node,
+    Edge,
+    Path,
+}
+
+/// A graph node value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Node {
+    pub id: i64,
+    pub labels: Vec<String>,
+    pub properties: HashMap<String, Value>,
+}
+
+/// A graph edge (relationship) value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Edge {
+    pub id: i64,
+    pub start_node: i64,
+    pub end_node: i64,
+    pub edge_type: String,
+    pub properties: HashMap<String, Value>,
+}
+
+/// A graph path value (alternating nodes and edges).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Path {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
 }
 
 /// Range type value
@@ -63,6 +91,9 @@ pub struct Value {
     time_value: Option<NaiveTime>,
     timestamp_value: Option<DateTime<Utc>>,
     range_value: Option<Range>,
+    node_value: Option<Box<Node>>,
+    edge_value: Option<Box<Edge>>,
+    path_value: Option<Box<Path>>,
 }
 
 impl Value {
@@ -83,6 +114,9 @@ impl Value {
             time_value: None,
             timestamp_value: None,
             range_value: None,
+            node_value: None,
+            edge_value: None,
+            path_value: None,
         }
     }
 
@@ -142,6 +176,33 @@ impl Value {
         Self {
             kind: ValueKind::Object,
             object_value: values,
+            ..Self::null()
+        }
+    }
+
+    /// Create a NODE value.
+    pub fn node(node: Node) -> Self {
+        Self {
+            kind: ValueKind::Node,
+            node_value: Some(Box::new(node)),
+            ..Self::null()
+        }
+    }
+
+    /// Create an EDGE value.
+    pub fn edge(edge: Edge) -> Self {
+        Self {
+            kind: ValueKind::Edge,
+            edge_value: Some(Box::new(edge)),
+            ..Self::null()
+        }
+    }
+
+    /// Create a PATH value.
+    pub fn path(path: Path) -> Self {
+        Self {
+            kind: ValueKind::Path,
+            path_value: Some(Box::new(path)),
             ..Self::null()
         }
     }
@@ -290,6 +351,48 @@ impl Value {
         }
     }
 
+    /// Get as a graph node.
+    pub fn as_node(&self) -> Result<&Node> {
+        if self.kind == ValueKind::Node {
+            self.node_value
+                .as_deref()
+                .ok_or_else(|| Error::type_error("Node value is None"))
+        } else {
+            Err(Error::type_error(format!(
+                "Cannot convert {:?} to node",
+                self.kind
+            )))
+        }
+    }
+
+    /// Get as a graph edge.
+    pub fn as_edge(&self) -> Result<&Edge> {
+        if self.kind == ValueKind::Edge {
+            self.edge_value
+                .as_deref()
+                .ok_or_else(|| Error::type_error("Edge value is None"))
+        } else {
+            Err(Error::type_error(format!(
+                "Cannot convert {:?} to edge",
+                self.kind
+            )))
+        }
+    }
+
+    /// Get as a graph path.
+    pub fn as_path(&self) -> Result<&Path> {
+        if self.kind == ValueKind::Path {
+            self.path_value
+                .as_deref()
+                .ok_or_else(|| Error::type_error("Path value is None"))
+        } else {
+            Err(Error::type_error(format!(
+                "Cannot convert {:?} to path",
+                self.kind
+            )))
+        }
+    }
+
     /// Convert to serde_json::Value for serialization
     pub fn to_json(&self) -> serde_json::Value {
         match self.kind {
@@ -350,6 +453,76 @@ impl Value {
                 } else {
                     serde_json::Value::Null
                 }
+            }
+            ValueKind::Node => {
+                let mut map = serde_json::Map::new();
+                if let Some(n) = &self.node_value {
+                    map.insert("id".into(), serde_json::Value::Number(n.id.into()));
+                    map.insert(
+                        "labels".into(),
+                        serde_json::Value::Array(
+                            n.labels
+                                .iter()
+                                .cloned()
+                                .map(serde_json::Value::String)
+                                .collect(),
+                        ),
+                    );
+                    let mut props = serde_json::Map::new();
+                    for (k, v) in &n.properties {
+                        props.insert(k.clone(), v.to_json());
+                    }
+                    map.insert("properties".into(), serde_json::Value::Object(props));
+                }
+                serde_json::Value::Object(map)
+            }
+            ValueKind::Edge => {
+                let mut map = serde_json::Map::new();
+                if let Some(e) = &self.edge_value {
+                    map.insert("id".into(), serde_json::Value::Number(e.id.into()));
+                    map.insert(
+                        "start_node".into(),
+                        serde_json::Value::Number(e.start_node.into()),
+                    );
+                    map.insert(
+                        "end_node".into(),
+                        serde_json::Value::Number(e.end_node.into()),
+                    );
+                    map.insert(
+                        "type".into(),
+                        serde_json::Value::String(e.edge_type.clone()),
+                    );
+                    let mut props = serde_json::Map::new();
+                    for (k, v) in &e.properties {
+                        props.insert(k.clone(), v.to_json());
+                    }
+                    map.insert("properties".into(), serde_json::Value::Object(props));
+                }
+                serde_json::Value::Object(map)
+            }
+            ValueKind::Path => {
+                let mut map = serde_json::Map::new();
+                if let Some(p) = &self.path_value {
+                    map.insert(
+                        "nodes".into(),
+                        serde_json::Value::Array(
+                            p.nodes
+                                .iter()
+                                .map(|n| Value::node(n.clone()).to_json())
+                                .collect(),
+                        ),
+                    );
+                    map.insert(
+                        "edges".into(),
+                        serde_json::Value::Array(
+                            p.edges
+                                .iter()
+                                .map(|e| Value::edge(e.clone()).to_json())
+                                .collect(),
+                        ),
+                    );
+                }
+                serde_json::Value::Object(map)
             }
         }
     }
@@ -429,6 +602,9 @@ impl Value {
             | ValueKind::TimestampTz
             | ValueKind::Interval => self.string_value.clone(),
             ValueKind::Range => serde_json::to_string(&self.to_json()).unwrap_or_default(),
+            ValueKind::Node | ValueKind::Edge | ValueKind::Path => {
+                serde_json::to_string(&self.to_json()).unwrap_or_default()
+            }
         }
     }
 
@@ -737,8 +913,11 @@ mod tests {
             ValueKind::Enum,
             ValueKind::BitString,
             ValueKind::Range,
+            ValueKind::Node,
+            ValueKind::Edge,
+            ValueKind::Path,
         ];
-        assert_eq!(variants.len(), 23);
+        assert_eq!(variants.len(), 26);
         // Check uniqueness
         for i in 0..variants.len() {
             for j in (i + 1)..variants.len() {
@@ -1564,5 +1743,72 @@ mod tests {
         let v = decode_value(&json!("2024-01-15T10:30:00Z"), "TIMESTAMPTZ").unwrap();
         let ts = v.as_timestamp().unwrap();
         assert!(ts.hour() == 10);
+    }
+
+    #[test]
+    fn test_value_node_accessor() {
+        let mut props = HashMap::new();
+        props.insert("name".to_string(), Value::string("Alice"));
+        let node = Node {
+            id: 42,
+            labels: vec!["Person".into()],
+            properties: props,
+        };
+        let v = Value::node(node);
+        assert_eq!(v.kind, ValueKind::Node);
+        let n = v.as_node().unwrap();
+        assert_eq!(n.id, 42);
+        assert_eq!(n.labels, vec!["Person".to_string()]);
+        assert_eq!(
+            n.properties.get("name").unwrap().as_string().unwrap(),
+            "Alice"
+        );
+        assert!(v.as_edge().is_err());
+    }
+
+    #[test]
+    fn test_value_edge_accessor() {
+        let edge = Edge {
+            id: 1,
+            start_node: 10,
+            end_node: 20,
+            edge_type: "KNOWS".into(),
+            properties: HashMap::new(),
+        };
+        let v = Value::edge(edge);
+        let e = v.as_edge().unwrap();
+        assert_eq!(e.start_node, 10);
+        assert_eq!(e.end_node, 20);
+        assert_eq!(e.edge_type, "KNOWS");
+    }
+
+    #[test]
+    fn test_value_path_accessor() {
+        let n0 = Node {
+            id: 1,
+            labels: vec!["A".into()],
+            properties: HashMap::new(),
+        };
+        let n1 = Node {
+            id: 2,
+            labels: vec!["B".into()],
+            properties: HashMap::new(),
+        };
+        let e = Edge {
+            id: 99,
+            start_node: 1,
+            end_node: 2,
+            edge_type: "R".into(),
+            properties: HashMap::new(),
+        };
+        let v = Value::path(Path {
+            nodes: vec![n0, n1],
+            edges: vec![e],
+        });
+        let p = v.as_path().unwrap();
+        assert_eq!(p.nodes.len(), 2);
+        assert_eq!(p.edges.len(), 1);
+        assert_eq!(p.edges[0].start_node, 1);
+        assert_eq!(p.nodes[1].id, 2);
     }
 }
