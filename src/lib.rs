@@ -63,6 +63,7 @@ pub mod pool;
 pub mod proto;
 pub mod query_builder;
 pub mod quote;
+pub mod retry;
 pub mod schema;
 pub mod types;
 pub mod validate;
@@ -82,6 +83,7 @@ pub use error::{Error, Result};
 pub use pool::ConnectionPool;
 pub use query_builder::{EdgeDirection, PatternBuilder, PredicateBuilder, QueryBuilder};
 pub use quote::{quote_ident, quote_string, sanitize_graph_name};
+pub use retry::{RetryPolicy, retry};
 pub use schema::{Statement, parse_schema_fs};
 pub use types::{Range, Value, ValueKind};
 
