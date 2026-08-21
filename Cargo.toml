@@ -27,8 +27,8 @@ rustls-native-certs = "0.8"  # Load system root certificates for TLS verificatio
 secrecy = "0.10"  # Zeroize sensitive data on drop
 
 # gRPC and Protobuf support
-tonic = { version = "0.12", features = ["tls", "channel"] }
-prost = "0.13"
+tonic = { version = "0.14", features = ["tls", "channel"] }
+prost = "0.14"
 http = "1.0"
 hyper-util = { version = "0.1", features = ["tokio"] }
 tokio-rustls = "0.26"
@@ -39,7 +39,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Error handling
-thiserror = "1.0"
+thiserror = "2.0"
 anyhow = "1.0"
 
 # Utilities
@@ -62,11 +62,11 @@ hex = "0.4"
 # Field-level encryption (FLE)
 # aes-gcm enables `getrandom` by default, providing the OsRng used to draw
 # AES-GCM nonces — so `rand` is never used directly by this client.
-aes-gcm = "0.10"
-hkdf = "0.12"
-hmac = "0.12"
-sha2 = "0.10"
-base64 = "0.22"
+aes-gcm = "0.11"
+hkdf = "0.13"
+hmac = "0.13"
+sha2 = "0.11"
+base64 = "0.23"
 zeroize = { version = "1.8", features = ["derive"] }
 
 # Logging
@@ -93,8 +93,8 @@ name = "geode_client"
 path = "src/lib.rs"
 
 [build-dependencies]
-tonic-build = "0.12"
-prost-build = "0.13"
+tonic-build = "0.14"
+prost-build = "0.14"
 
 [features]
 default = ["quic", "grpc"]
@@ -104,10 +104,10 @@ integration = []  # Enable integration tests with Docker
 
 [dev-dependencies]
 tokio-test = "0.4"
-criterion = "0.5"
+criterion = "0.8"
 env_logger = "0.11"
 rust_decimal_macros = "1.33"
-testcontainers = "0.23"
+testcontainers = "0.28"
 once_cell = "1.19"
 proptest = "1.5"
 arbitrary = { version = "1.4", features = ["derive"] }

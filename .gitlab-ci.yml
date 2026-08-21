@@ -6,75 +6,75 @@
 include:
   # Lint: rustfmt and clippy checks
   # Pinned to v1.9.15 for supply chain security (CWE-1104)
-  - component: gitlab.com/devnw/ci-catalog/rust-lint@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/rust-lint@v1.48.0
     inputs:
       stage: lint
 
   # Build: compile in release mode
-  - component: gitlab.com/devnw/ci-catalog/rust-build@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/rust-build@v1.48.0
     inputs:
       stage: build
       profile: release
 
   # Unit tests
-  - component: gitlab.com/devnw/ci-catalog/rust-test@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/rust-test@v1.48.0
     inputs:
       stage: test
       test_args: '--lib --no-fail-fast'
 
   # Property-based tests (proptest)
-  - component: gitlab.com/devnw/ci-catalog/rust-test@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/rust-test@v1.48.0
     inputs:
       stage: test
       test_args: '--test proptest --no-fail-fast'
 
   # Doc tests
-  - component: gitlab.com/devnw/ci-catalog/rust-test@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/rust-test@v1.48.0
     inputs:
       stage: test
       test_args: '--doc'
 
   # Coverage reporting
-  - component: gitlab.com/devnw/ci-catalog/rust-coverage@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/rust-coverage@v1.48.0
     inputs:
       stage: coverage
       tarpaulin_args: '--lib'
       allow_failure: true
 
   # Documentation generation
-  - component: gitlab.com/devnw/ci-catalog/rust-doc@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/rust-doc@v1.48.0
     inputs:
       stage: docs
       publish_pages: true
 
   # Security scanning - pinned versions for supply chain security
-  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/security-sast@v1.48.0
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.48.0
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.48.0
     inputs:
       stage: security
 
-  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.48.0
 
   # SBOM generation and scanning
-  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.48.0
 
-  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.48.0
 
   # Release creation
-  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.48.0
     inputs:
       stage: release
 
   # Publish to crates.io (triggered on version tags)
   # Uses CARGO_REGISTRY_TOKEN CI/CD variable
-  - component: gitlab.com/devnw/ci-catalog/rust-publish@v1.9.15
+  - component: gitlab.com/devnw/ci-catalog/rust-publish@v1.48.0
     inputs:
       stage: publish
       needs: rust-build
@@ -109,7 +109,7 @@ stages:
 
 security:cargo-audit:
   stage: security
-  image: rust:1.85-bookworm
+  image: rust:1.98-bookworm
   before_script:
     # Pin to 0.22.1: cargo-audit 0.22.2+ requires rustc 1.88, but this job
     # pins the MSRV image rust:1.85; 0.22.1 is the latest that supports 1.85.
