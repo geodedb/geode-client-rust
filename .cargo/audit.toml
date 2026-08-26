@@ -52,4 +52,16 @@ ignore = [
     # that uses rand 0.9.
     # Review date: 2026-06-01
     "RUSTSEC-2026-0097",
+
+    # RUSTSEC-2026-0235: rkyv 0.7 out-of-bounds reads validating Rc/Arc archives
+    # Status: ACCEPTED RISK (Never-activated optional dependency)
+    # Justification: rkyv appears in Cargo.lock only because rust_decimal
+    # declares it as an OPTIONAL dependency; this client never enables the
+    # rust_decimal `rkyv` feature, so rkyv is not present in any build graph
+    # (`cargo tree -i rkyv --target all -e all` prints nothing). cargo-audit
+    # scans the lockfile, which records optional deps regardless of feature
+    # activation. Fixing requires rust_decimal to move to rkyv 0.8; revisit
+    # when that ships.
+    # Review date: 2026-08-26
+    "RUSTSEC-2026-0235",
 ]
