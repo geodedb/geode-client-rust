@@ -27,7 +27,8 @@ rustls-native-certs = "0.8"  # Load system root certificates for TLS verificatio
 secrecy = "0.10"  # Zeroize sensitive data on drop
 
 # gRPC and Protobuf support
-tonic = { version = "0.14", features = ["tls", "channel"] }
+tonic = { version = "0.14", features = ["tls-ring", "channel"] }
+tonic-prost = "0.14"
 prost = "0.14"
 http = "1.0"
 hyper-util = { version = "0.1", features = ["tokio"] }
@@ -60,9 +61,10 @@ urlencoding = "2.1"
 hex = "0.4"
 
 # Field-level encryption (FLE)
-# aes-gcm enables `getrandom` by default, providing the OsRng used to draw
-# AES-GCM nonces — so `rand` is never used directly by this client.
+# AES-GCM nonces are drawn from the OS CSPRNG via `getrandom` — so `rand`
+# is never used directly by this client.
 aes-gcm = "0.11"
+getrandom = "0.3"
 hkdf = "0.13"
 hmac = "0.13"
 sha2 = "0.11"
@@ -93,7 +95,7 @@ name = "geode_client"
 path = "src/lib.rs"
 
 [build-dependencies]
-tonic-build = "0.14"
+tonic-prost-build = "0.14"
 prost-build = "0.14"
 
 [features]

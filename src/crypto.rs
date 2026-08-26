@@ -1,7 +1,7 @@
 //! Field-level encryption (FLE): AES-256-GCM with HKDF-SHA256 key derivation.
 //! Port of the Go driver's crypto/cipher.go.
 
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -55,9 +55,12 @@ impl Cipher {
     /// Encrypt plaintext. Output layout: `nonce(12) || ciphertext || tag(16)`.
     ///
     /// The 96-bit nonce is drawn from the operating-system CSPRNG via
-    /// [`OsRng`], matching the Go driver's `crypto/rand` source.
+    /// [`getrandom`], matching the Go driver's `crypto/rand` source.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let mut nonce_bytes = [0u8; NONCE_SIZE];
+        getrandom::fill(&mut nonce_bytes)
+            .map_err(|e| Error::Other(format!("crypto: nonce: {e}")))?;
+        let nonce = Nonce::from(nonce_bytes);
 
         let ct = self
             .cipher
@@ -82,10 +85,11 @@ impl Cipher {
             return Err(Error::Other("crypto: ciphertext too short".into()));
         }
         let (nonce_bytes, data) = ciphertext.split_at(NONCE_SIZE);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes)
+            .map_err(|_| Error::Other("crypto: bad nonce length".into()))?;
         self.cipher
             .decrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: data,
                     aad: &[],
@@ -112,7 +116,7 @@ impl Cipher {
     /// Compute the lowercase hex HMAC-SHA256 of `data` using the HMAC key.
     /// Deterministic — used for searchable equality lookups.
     pub fn hmac_hex(&self, data: &str) -> String {
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&self.hmac_key)
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(&self.hmac_key)
             .expect("HMAC accepts any key length");
         mac.update(data.as_bytes());
         hex::encode(mac.finalize().into_bytes())

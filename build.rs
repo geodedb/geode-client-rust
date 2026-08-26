@@ -34,7 +34,7 @@ fn main() {
     // To regenerate after changing proto/geode.proto:
     //   GENERATE_PROTO=1 cargo build
     if std::env::var("GENERATE_PROTO").is_ok_and(|v| v == "1") {
-        tonic_build::configure()
+        tonic_prost_build::configure()
             .build_server(false) // Client library only needs the client stub
             .build_client(true)
             .out_dir("src/generated")
