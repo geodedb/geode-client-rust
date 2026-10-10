@@ -15,12 +15,12 @@ categories = ["database", "asynchronous"]
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.35", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
 
 # QUIC support - using quinn (Pure Rust QUIC with rustls)
 quinn = "0.11"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
-rustls-pemfile = "2.0"
+rustls-pemfile = "2.2"
 rustls-native-certs = "0.8"  # Load system root certificates for TLS verification
 
 # Security
@@ -30,7 +30,7 @@ secrecy = "0.10"  # Zeroize sensitive data on drop
 tonic = { version = "0.14", features = ["tls-ring", "channel"] }
 tonic-prost = "0.14"
 prost = "0.14"
-http = "1.0"
+http = "1.5"
 hyper-util = { version = "0.1", features = ["tokio"] }
 tokio-rustls = "0.26"
 tower-service = "0.3"
@@ -44,11 +44,11 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Utilities
-bytes = "1.5"
+bytes = "1.12"
 futures = "0.3"
 
 # Decimal support
-rust_decimal = "1.33"
+rust_decimal = "1.43"
 
 # Datetime support
 chrono = { version = "0.4", features = ["serde"] }
@@ -64,12 +64,12 @@ hex = "0.4"
 # AES-GCM nonces are drawn from the OS CSPRNG via `getrandom` — so `rand`
 # is never used directly by this client.
 aes-gcm = "0.11"
-getrandom = "0.3"
+getrandom = "0.4"
 hkdf = "0.13"
 hmac = "0.13"
 sha2 = "0.11"
 base64 = "0.23"
-zeroize = { version = "1.8", features = ["derive"] }
+zeroize = { version = "1.9", features = ["derive"] }
 
 # Logging
 log = "0.4"
@@ -108,11 +108,11 @@ integration = []  # Enable integration tests with Docker
 tokio-test = "0.4"
 criterion = "0.8"
 env_logger = "0.11"
-rust_decimal_macros = "1.33"
+rust_decimal_macros = "1.40"
 testcontainers = "0.28"
-once_cell = "1.19"
-proptest = "1.5"
-arbitrary = { version = "1.4", features = ["derive"] }
+once_cell = "1.21"
+proptest = "1.11"
+arbitrary = { version = "1.5", features = ["derive"] }
 
 [[test]]
 name = "integration"
