@@ -38,3 +38,8 @@ Thumbs.db
 # Environment files
 .env
 .env.local
+
+# CI download caches
+/.cargo/
+/.cargo-audit/
+/.ci-tools/
