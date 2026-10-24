@@ -59,9 +59,11 @@ include:
 
 # SBOM jobs may fail due to DNS/network issues downloading syft
 sbom-generate:
+  interruptible: true
   allow_failure: true
 
 sbom-scan:
+  interruptible: true
   allow_failure: true
 
 variables:
@@ -100,6 +102,7 @@ stages:
 # -----------------------------------------------------------------------------
 
 security:cargo-audit:
+  interruptible: true
   stage: security
   image: rust:1.99-bookworm
   tags: [company, linux, x86]
@@ -143,6 +146,7 @@ security:cargo-audit:
 # -----------------------------------------------------------------------------
 
 test:integration:
+  interruptible: true
   stage: test
   image: rust:latest
   cache: *rust-cache
@@ -174,6 +178,7 @@ test:integration:
 # -----------------------------------------------------------------------------
 
 benchmark:
+  interruptible: true
   stage: test
   image: rust:latest
   cache: *rust-cache
@@ -192,6 +197,7 @@ benchmark:
 # -----------------------------------------------------------------------------
 
 pages:
+  interruptible: false
   stage: docs
   image: rust:latest
   needs:
@@ -206,6 +212,10 @@ pages:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 workflow:
+  # SRE-172: a newer commit on the same ref cancels the superseded pipeline's
+  # interruptible (validation) jobs. Release/deploy jobs stay non-interruptible.
+  auto_cancel:
+    on_new_commit: interruptible
   # An open MR owns push validation; keep schedules, API, trigger,
   # parent pipelines, tags and manual runs admitted as before.
   rules:
