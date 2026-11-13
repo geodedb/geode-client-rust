@@ -64,4 +64,14 @@ ignore = [
     # when that ships.
     # Review date: 2026-08-26
     "RUSTSEC-2026-0235",
+
+    # RUSTSEC-2026-0440: astral-tokio-tar unmaintained
+    # Status: ACCEPTED RISK (Warning only; dev-only dependency)
+    # Justification: astral-tokio-tar is pulled in only by testcontainers
+    # (dev-dependency), which uses it to build Docker contexts for the
+    # integration tests. It is never part of a production build.
+    # testcontainers 0.28.0 is the latest release and still depends on it.
+    # Revisit when testcontainers moves to a maintained tar crate.
+    # Review date: 2026-11-12
+    "RUSTSEC-2026-0440",
 ]
