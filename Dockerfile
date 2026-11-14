@@ -1,7 +1,7 @@
 # Multi-stage Dockerfile for building Rust geode-client
 # Builds using standard Ubuntu environment to avoid Nix/BoringSSL issues
 
-FROM rust:1.99-bookworm AS builder
+FROM rust:1.100-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
