@@ -152,7 +152,7 @@ test:integration:
   image: rust:latest
   cache: *rust-cache
   services:
-    - name: geodedb/geode:0.8.25@sha256:a4648af36bb942fe51a6dec489b95306bd492318f1d2de4b441b928ed6a8ec54
+    - name: geodedb/geode:0.8.27@sha256:2c5a9b856ab7ba4b12e6bc88786a663c3321270eec308bde5f8f9028fa69bb85
       alias: geode
       command: ["serve", "--listen", "0.0.0.0:3141", "--log-level", "info", "--data-dir", "/data"]
   variables:
